@@ -1,0 +1,21 @@
+# Environment variables
+.env
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Hardhat
+artifacts/
+cache/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# Frontend build
+frontend/dist/
+frontend/node_modules/

@@ -1,0 +1,11 @@
+fastapi==0.109.0
+uvicorn==0.27.0
+langchain==0.1.0
+langchain-google-genai==0.0.13
+langchain-core==0.1.0
+web3==6.11.3
+apscheduler==3.10.4
+python-dotenv==1.0.0
+pydantic==2.5.0
+google-genai==0.3.0
+cryptography==41.0.7

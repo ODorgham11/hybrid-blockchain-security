@@ -1,0 +1,1883 @@
+================================================================================
+FILE: contracts/AuditRegistry.sol
+================================================================================
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.28;
+
+/// @title AuditRegistry
+/// @notice Immutable on-chain log of every AI agent decision.
+contract AuditRegistry {
+
+    // ── Enums ──────────────────────────────────────────────────────────────
+    enum RiskLevel { LOW, MEDIUM, HIGH, CRITICAL }
+
+    // ── Structs ────────────────────────────────────────────────────────────
+    struct AuditEntry {
+        bytes32 instructionHash; // SHA-256 of the task sent to the agent
+        bytes32 contextHash;     // SHA-256 of retrieved context / memory
+        bytes32 reasoningHash;   // SHA-256 of agent chain-of-thought
+        bytes32 actionHash;      // SHA-256 of the action to be executed
+        bytes32 resultHash;      // SHA-256 of execution result (set later)
+        RiskLevel riskLevel;
+        uint256 timestamp;
+        address submitter;
+        bool resultLogged;
+    }
+
+    // ── State ──────────────────────────────────────────────────────────────
+    mapping(uint256 => AuditEntry) private entries;
+    uint256 public entryCount;
+
+    mapping(uint256 => bytes32) public batchRoots;
+    uint256 public batchCount;
+
+    // ── Events ─────────────────────────────────────────────────────────────
+    event ActionLogged(uint256 indexed entryId, RiskLevel riskLevel, address submitter);
+    event ResultLogged(uint256 indexed entryId, bytes32 resultHash);
+    event BatchLogged(uint256 indexed batchId, bytes32 merkleRoot, uint256 timestamp);
+
+    // ── Write Functions ────────────────────────────────────────────────────
+
+    /// @notice Log a batch of AI decisions via Merkle root.
+    function recordBatchRoot(bytes32 _merkleRoot) external returns (uint256 batchId) {
+        batchId = batchCount++;
+        batchRoots[batchId] = _merkleRoot;
+        emit BatchLogged(batchId, _merkleRoot, block.timestamp);
+    }
+
+    /// @notice Log an AI decision before it executes. Returns the entry ID.
+    function logAction(
+        bytes32 _instructionHash,
+        bytes32 _contextHash,
+        bytes32 _reasoningHash,
+        bytes32 _actionHash,
+        uint8   _riskLevel
+    ) external returns (uint256 entryId) {
+        require(_riskLevel <= 3, "Invalid risk level");
+
+        entryId = entryCount++;
+        entries[entryId] = AuditEntry({
+            instructionHash: _instructionHash,
+            contextHash:     _contextHash,
+            reasoningHash:   _reasoningHash,
+            actionHash:      _actionHash,
+            resultHash:      bytes32(0),
+            riskLevel:       RiskLevel(_riskLevel),
+            timestamp:       block.timestamp,
+            submitter:       msg.sender,
+            resultLogged:    false
+        });
+
+        emit ActionLogged(entryId, RiskLevel(_riskLevel), msg.sender);
+    }
+
+    /// @notice Log the result after the action executes.
+    function logResult(uint256 _entryId, bytes32 _resultHash) external {
+        require(_entryId < entryCount, "Entry does not exist");
+        require(!entries[_entryId].resultLogged, "Result already logged");
+
+        entries[_entryId].resultHash   = _resultHash;
+        entries[_entryId].resultLogged = true;
+
+        emit ResultLogged(_entryId, _resultHash);
+    }
+
+    // ── Read Functions ─────────────────────────────────────────────────────
+
+    /// @notice Get a full audit entry by ID.
+    function getEntry(uint256 _entryId) external view returns (AuditEntry memory) {
+        require(_entryId < entryCount, "Entry does not exist");
+        return entries[_entryId];
+    }
+
+    /// @notice Verify that a given hash matches the stored actionHash for an entry.
+    function verifyActionHash(uint256 _entryId, bytes32 _hash) external view returns (bool) {
+        require(_entryId < entryCount, "Entry does not exist");
+        return entries[_entryId].actionHash == _hash;
+    }
+}
+
+================================================================================
+FILE: contracts/Governance.sol
+================================================================================
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.28;
+
+import "./AuditRegistry.sol";
+
+/// @title Governance
+/// @notice Handles human approval for HIGH and CRITICAL risk AI actions.
+contract Governance {
+
+    // ── State ──────────────────────────────────────────────────────────────
+    address public owner;
+    AuditRegistry public auditRegistry;
+
+    mapping(address => bool) public authorizedSigners;
+    mapping(uint256 => bool) public pendingApprovals;
+    mapping(uint256 => bool) public approvedActions;
+
+    // ── Events ─────────────────────────────────────────────────────────────
+    event ApprovalRequested(uint256 indexed entryId);
+    event ActionApproved(uint256 indexed entryId, address indexed approver);
+    event ActionRejected(uint256 indexed entryId, address indexed rejector);
+    event SignerAdded(address indexed signer);
+    event SignerRemoved(address indexed signer);
+
+    // ── Modifiers ──────────────────────────────────────────────────────────
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Only owner can call this");
+        _;
+    }
+
+    modifier onlySigner() {
+        require(authorizedSigners[msg.sender], "Not an authorized signer");
+        _;
+    }
+
+    // ── Constructor ────────────────────────────────────────────────────────
+    constructor(address _auditRegistryAddress) {
+        owner = msg.sender;
+        authorizedSigners[msg.sender] = true; // Owner is a signer by default
+        auditRegistry = AuditRegistry(_auditRegistryAddress);
+    }
+
+    // ── Admin Functions ────────────────────────────────────────────────────
+
+    function addSigner(address _signer) external onlyOwner {
+        authorizedSigners[_signer] = true;
+        emit SignerAdded(_signer);
+    }
+
+    function removeSigner(address _signer) external onlyOwner {
+        require(_signer != owner, "Cannot remove owner");
+        authorizedSigners[_signer] = false;
+        emit SignerRemoved(_signer);
+    }
+
+    // ── Governance Logic ───────────────────────────────────────────────────
+
+    /// @notice Request human approval for a specific audit entry.
+    function requestApproval(uint256 _entryId) external {
+        // Verify the entry exists in the registry
+        AuditRegistry.AuditEntry memory entry = auditRegistry.getEntry(_entryId);
+        
+        // Only HIGH (2) or CRITICAL (3) need approval
+        require(uint8(entry.riskLevel) >= 2, "Risk level does not require approval");
+        require(!approvedActions[_entryId], "Already approved");
+        require(!pendingApprovals[_entryId], "Approval already requested");
+
+        pendingApprovals[_entryId] = true;
+        emit ApprovalRequested(_entryId);
+    }
+
+    /// @notice Approve a pending AI action.
+    function approve(uint256 _entryId) external onlySigner {
+        require(pendingApprovals[_entryId], "No pending approval for this entry");
+
+        pendingApprovals[_entryId] = false;
+        approvedActions[_entryId] = true;
+
+        emit ActionApproved(_entryId, msg.sender);
+    }
+
+    /// @notice Reject a pending AI action.
+    function reject(uint256 _entryId) external onlySigner {
+        require(pendingApprovals[_entryId], "No pending approval for this entry");
+
+        pendingApprovals[_entryId] = false;
+        // approvedActions remains false
+
+        emit ActionRejected(_entryId, msg.sender);
+    }
+
+    // ── View Functions ─────────────────────────────────────────────────────
+
+    function isApproved(uint256 _entryId) external view returns (bool) {
+        return approvedActions[_entryId];
+    }
+
+    function isPending(uint256 _entryId) external view returns (bool) {
+        return pendingApprovals[_entryId];
+    }
+}
+
+================================================================================
+FILE: contracts/PostureRegistry.sol
+================================================================================
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.28;
+
+/// @title PostureRegistry
+/// @notice Stores daily cryptographic snapshots of the company's security posture.
+contract PostureRegistry {
+
+    struct PostureSnapshot {
+        bytes32 merkleRoot;       // Represents 4 hashes (firewall, backup, cves, admin)
+        uint256 timestamp;
+        address company;
+        uint8 complianceScore;    // 0-100 score based on that day's data
+    }
+
+    // Mapping from company address to an array of their daily snapshots
+    mapping(address => PostureSnapshot[]) private snapshots;
+
+    event SnapshotRecorded(address indexed company, bytes32 merkleRoot, uint8 score);
+
+    /// @notice Records a new daily snapshot
+    function recordSnapshot(bytes32 _merkleRoot, uint8 _score) external {
+        require(_score <= 100, "Score must be 0-100");
+
+        PostureSnapshot memory newSnapshot = PostureSnapshot({
+            merkleRoot: _merkleRoot,
+            timestamp: block.timestamp,
+            company: msg.sender,
+            complianceScore: _score
+        });
+
+        snapshots[msg.sender].push(newSnapshot);
+
+        emit SnapshotRecorded(msg.sender, _merkleRoot, _score);
+    }
+
+    /// @notice Gets the most recent snapshot for a company
+    function getLastSnapshot(address _company) external view returns (PostureSnapshot memory) {
+        require(snapshots[_company].length > 0, "No snapshots found");
+        return snapshots[_company][snapshots[_company].length - 1];
+    }
+
+    /// @notice Gets the total number of snapshots for a company
+    function getSnapshotCount(address _company) external view returns (uint256) {
+        return snapshots[_company].length;
+    }
+
+    /// @notice Gets a specific snapshot by index
+    function getSnapshotByIndex(address _company, uint256 _index) external view returns (PostureSnapshot memory) {
+        require(_index < snapshots[_company].length, "Index out of bounds");
+        return snapshots[_company][_index];
+    }
+
+    /// @notice Calculates the 90-day rolling Security Hygiene Score
+    function getSecurityHygieneScore(address _company) external view returns (uint8) {
+        uint256 count = snapshots[_company].length;
+        if (count == 0) return 0;
+
+        uint256 totalScore = 0;
+        uint256 daysToAverage = count < 90 ? count : 90;
+
+        for (uint256 i = count - daysToAverage; i < count; i++) {
+            totalScore += snapshots[_company][i].complianceScore;
+        }
+
+        return uint8(totalScore / daysToAverage);
+    }
+}
+
+================================================================================
+FILE: contracts/PolicyEngine.sol
+================================================================================
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.28;
+
+/// @title PolicyEngine
+/// @notice Stores the insurer-defined coverage rules for each company.
+contract PolicyEngine {
+
+    struct PolicyRule {
+        string ruleName;
+        bool required;          // If true, failing this rule means claim is denied
+        uint256 maxAgeSeconds;  // How fresh the evidence must be (e.g., 86400 = 1 day)
+        uint8 weight;           // How much this counts towards partial payout percentage
+    }
+
+    address public insurer;
+    
+    // Mapping from company address to their active policy rules
+    mapping(address => PolicyRule[]) private companyPolicies;
+    mapping(address => bool) public isPolicyActive;
+
+    event PolicySet(address indexed company, uint256 ruleCount);
+
+    modifier onlyInsurer() {
+        require(msg.sender == insurer, "Only insurer can call this");
+        _;
+    }
+
+    constructor() {
+        insurer = msg.sender;
+    }
+
+    /// @notice Defines the policy rules for a specific company
+    function setPolicy(
+        address _company,
+        string[] calldata _ruleNames,
+        bool[] calldata _requiredFlags,
+        uint256[] calldata _maxAgeSeconds,
+        uint8[] calldata _weights
+    ) external onlyInsurer {
+        uint256 length = _ruleNames.length;
+        require(
+            _requiredFlags.length == length &&
+            _maxAgeSeconds.length == length &&
+            _weights.length == length,
+            "Array lengths must match"
+        );
+
+        delete companyPolicies[_company]; // Clear old policy
+
+        for (uint256 i = 0; i < length; i++) {
+            companyPolicies[_company].push(PolicyRule({
+                ruleName: _ruleNames[i],
+                required: _requiredFlags[i],
+                maxAgeSeconds: _maxAgeSeconds[i],
+                weight: _weights[i]
+            }));
+        }
+
+        isPolicyActive[_company] = true;
+        emit PolicySet(_company, length);
+    }
+
+    /// @notice Retrieves the full policy for a company
+    function getPolicy(address _company) external view returns (PolicyRule[] memory) {
+        return companyPolicies[_company];
+    }
+}
+
+================================================================================
+FILE: contracts/ClaimsProcessor.sol
+================================================================================
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.28;
+
+import "./PostureRegistry.sol";
+import "./PolicyEngine.sol";
+
+/// @title ClaimsProcessor
+/// @notice Automated judge that processes cyber insurance claims based on immutable evidence.
+contract ClaimsProcessor {
+
+    enum Verdict { PENDING, APPROVED, PARTIAL, DENIED }
+
+    struct Claim {
+        address company;
+        uint256 breachTimestamp;
+        string attackType;
+        uint256 claimedAmount;
+        Verdict verdict;
+        uint8 payoutPercentage;  // 0-100
+        uint8 fraudScore;        // Provided by AI Fraud Analyzer (0-100, higher = more fraud risk)
+        bytes32 fraudReportHash; // SHA-256 of the AI Fraud Analyzer's text report
+        uint256 processedAt;
+    }
+
+    PostureRegistry public postureRegistry;
+    PolicyEngine public policyEngine;
+    
+    mapping(uint256 => Claim) private claims;
+    uint256 public claimCount;
+
+    address public backendSystem; // The Python backend that feeds the AI fraud score
+
+    event ClaimFiled(uint256 indexed claimId, address indexed company);
+    event ClaimProcessed(uint256 indexed claimId, Verdict verdict, uint8 payoutPercentage);
+    event FraudScoreRecorded(uint256 indexed claimId, uint8 fraudScore);
+
+    modifier onlyBackend() {
+        require(msg.sender == backendSystem, "Only backend can record AI scores");
+        _;
+    }
+
+    constructor(address _postureRegistryAddress, address _policyEngineAddress) {
+        postureRegistry = PostureRegistry(_postureRegistryAddress);
+        policyEngine = PolicyEngine(_policyEngineAddress);
+        backendSystem = msg.sender; // Deployer acts as backend initially
+    }
+
+    /// @notice Company files a new claim
+    function fileClaim(
+        uint256 _breachTimestamp,
+        string calldata _attackType,
+        uint256 _claimedAmount
+    ) external returns (uint256 claimId) {
+        require(policyEngine.isPolicyActive(msg.sender), "No active policy");
+
+        claimId = claimCount++;
+        claims[claimId] = Claim({
+            company: msg.sender,
+            breachTimestamp: _breachTimestamp,
+            attackType: _attackType,
+            claimedAmount: _claimedAmount,
+            verdict: Verdict.PENDING,
+            payoutPercentage: 0,
+            fraudScore: 0,
+            fraudReportHash: bytes32(0),
+            processedAt: 0
+        });
+
+        emit ClaimFiled(claimId, msg.sender);
+    }
+
+    /// @notice Backend records the AI Fraud Analyzer's score
+    function recordFraudScore(uint256 _claimId, uint8 _fraudScore, bytes32 _reportHash) external onlyBackend {
+        require(_claimId < claimCount, "Claim does not exist");
+        require(claims[_claimId].verdict == Verdict.PENDING, "Claim already processed");
+
+        claims[_claimId].fraudScore = _fraudScore;
+        claims[_claimId].fraudReportHash = _reportHash;
+
+        emit FraudScoreRecorded(_claimId, _fraudScore);
+    }
+
+    /// @notice Backend triggers processing after fraud score is logged
+    function processClaim(uint256 _claimId) external onlyBackend {
+        require(_claimId < claimCount, "Claim does not exist");
+        Claim storage claim = claims[_claimId];
+        require(claim.verdict == Verdict.PENDING, "Claim already processed");
+        require(claim.fraudReportHash != bytes32(0), "AI Fraud score must be recorded first");
+
+        // 1. Check Policy
+        // In a full implementation, we would iterate over getPolicy() rules
+        // and cross-reference them against getLastSnapshot() or getSnapshotBefore().
+        // For this demo, we use the rolling Security Hygiene Score and the AI fraud score.
+        
+        uint8 shs = postureRegistry.getSecurityHygieneScore(claim.company);
+        uint8 aiFraudRisk = claim.fraudScore;
+
+        if (aiFraudRisk > 75) {
+            // High fraud probability = instant denial
+            claim.verdict = Verdict.DENIED;
+            claim.payoutPercentage = 0;
+        } else if (shs >= 90 && aiFraudRisk < 30) {
+            // Excellent hygiene, low fraud risk = full approval
+            claim.verdict = Verdict.APPROVED;
+            claim.payoutPercentage = 100;
+        } else if (shs >= 50) {
+            // Partial compliance = partial payout
+            claim.verdict = Verdict.PARTIAL;
+            claim.payoutPercentage = shs; // Pay out matching their score (e.g., 60 SHS = 60% payout)
+        } else {
+            // Poor hygiene = denial
+            claim.verdict = Verdict.DENIED;
+            claim.payoutPercentage = 0;
+        }
+
+        claim.processedAt = block.timestamp;
+        emit ClaimProcessed(_claimId, claim.verdict, claim.payoutPercentage);
+    }
+
+    function getClaim(uint256 _claimId) external view returns (Claim memory) {
+        require(_claimId < claimCount, "Claim does not exist");
+        return claims[_claimId];
+    }
+}
+
+================================================================================
+FILE: backend/main.py
+================================================================================
+import sys
+import asyncio
+from pathlib import Path
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+# Import our custom modules
+import blockchain
+from agents.security_agent import SecurityAgent
+from agents.anomaly_detector import AnomalyDetector
+from agents.fraud_analyzer import FraudAnalyzer
+from notarizer import Notarizer
+
+app = FastAPI(title="Hybrid Security & Insurance Backend (Phase 2 Fixed)")
+
+# Constraint: uvicorn must run with --workers 1
+# This ensures asyncio.Lock works correctly for the sequential ID system.
+
+# Initialize async queue for agent events
+event_queue = asyncio.Queue()
+notarizer = Notarizer(event_queue)
+
+# CORS Fix: Restricted to frontend URL for credentials support
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Initialize AI Agents
+security_agent = SecurityAgent()
+anomaly_detector = AnomalyDetector()
+fraud_analyzer = FraudAnalyzer()
+
+@app.on_event("startup")
+async def startup_event():
+    """System startup: Initialize blockchain and start background notarizer."""
+    blockchain.init_blockchain()
+    notarizer.start()
+
+# --- Request Models ---
+class AlertRequest(BaseModel):
+    alert: str
+    context: str
+
+class LogsRequest(BaseModel):
+    daily_logs: str
+
+class ClaimRequest(BaseModel):
+    claim_id: int
+    claim_data: str
+    historical_posture: str
+
+# --- API Endpoints ---
+
+@app.post("/api/analyze-alert")
+async def analyze_security_alert(req: AlertRequest):
+    result = await security_agent.handle_alert(req.alert, req.context, event_queue, notarizer)
+    if not result.get("success", True) or "error" in result:
+        raise HTTPException(status_code=500, detail=result.get("error", "Unknown error"))
+    return result
+
+@app.post("/api/analyze-daily-logs")
+async def analyze_logs(req: LogsRequest):
+    result = await anomaly_detector.analyze_daily_logs(req.daily_logs, event_queue, notarizer)
+    if not result.get("success", True) or "error" in result:
+        raise HTTPException(status_code=500, detail=result.get("error", "Unknown error"))
+    return result
+
+@app.post("/api/analyze-claim")
+async def analyze_insurance_claim(req: ClaimRequest):
+    result = await fraud_analyzer.analyze_claim(req.claim_id, req.claim_data, req.historical_posture, event_queue, notarizer)
+    if not result.get("success", True) or "error" in result:
+        raise HTTPException(status_code=500, detail=result.get("error", "Unknown error"))
+    return result
+
+@app.get("/api/sequence-status")
+async def get_sequence_status():
+    return notarizer.get_sequence_status()
+
+@app.get("/api/verify-event/{event_hash}")
+async def verify_event(event_hash: str):
+    proof_data = notarizer.get_event_proof(event_hash)
+    if not proof_data:
+        raise HTTPException(status_code=404, detail="Event hash not found.")
+    return proof_data
+
+@app.get("/")
+def health_check():
+    return {
+        "status": "active",
+        "blockchain": "connected" if blockchain.BLOCKCHAIN_AVAILABLE else "disconnected",
+        "llm": "ready" # Agents check individually
+    }
+
+if __name__ == "__main__":
+    import uvicorn
+    # Single worker only for sequence integrity
+    uvicorn.run("main:app", host="127.0.0.1", port=8000, workers=1)
+
+================================================================================
+FILE: backend/blockchain.py
+================================================================================
+import json
+import os
+import logging
+from pathlib import Path
+from web3 import Web3
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Global state
+w3 = Web3(Web3.HTTPProvider(os.getenv("HARDHAT_RPC_URL", "http://127.0.0.1:8545")))
+BLOCKCHAIN_AVAILABLE = False
+audit_registry = None
+governance = None
+posture_registry = None
+claims_processor = None
+policy_engine = None
+
+logger = logging.getLogger("blockchain")
+
+def get_contract_abi(contract_name: str) -> list:
+    """Loads the ABI from the Hardhat artifacts folder."""
+    base_path = Path(__file__).parent.parent
+    artifact_path = base_path / "artifacts" / "contracts" / f"{contract_name}.sol" / f"{contract_name}.json"
+    
+    if not artifact_path.exists():
+        raise FileNotFoundError(f"Could not find artifact for {contract_name} at {artifact_path}. Did you compile?")
+        
+    with open(artifact_path, "r") as f:
+        data = json.load(f)
+    return data["abi"]
+
+def init_blockchain():
+    global BLOCKCHAIN_AVAILABLE, audit_registry, governance, posture_registry, claims_processor, policy_engine
+    
+    print("[Blockchain] Connecting to Hardhat node...")
+    if not w3.is_connected():
+        logger.critical("Could not connect to Web3 provider. Blockchain features disabled.")
+        BLOCKCHAIN_AVAILABLE = False
+        return
+
+    try:
+        w3.eth.default_account = w3.eth.accounts[0]
+        
+        # Load addresses from deployed_addresses.json
+        addr_path = Path(__file__).parent / "deployed_addresses.json"
+        if not addr_path.exists():
+            raise FileNotFoundError("Run: npx hardhat run scripts/deploy.js first")
+            
+        with open(addr_path, "r") as f:
+            addresses = json.load(f)
+
+        def load_contract(name, key):
+            abi = get_contract_abi(name)
+            return w3.eth.contract(address=addresses[key], abi=abi)
+
+        audit_registry = load_contract("AuditRegistry", "AuditRegistry")
+        governance = load_contract("Governance", "Governance")
+        posture_registry = load_contract("PostureRegistry", "PostureRegistry")
+        claims_processor = load_contract("ClaimsProcessor", "ClaimsProcessor")
+        policy_engine = load_contract("PolicyEngine", "PolicyEngine")
+        
+        BLOCKCHAIN_AVAILABLE = True
+        print("[Blockchain] System initialized successfully.")
+    except Exception as e:
+        logger.critical(f"Blockchain initialization failed: {e}")
+        BLOCKCHAIN_AVAILABLE = False
+
+def log_ai_action(instruction_hash: str, context_hash: str, reasoning_hash: str, action_hash: str, risk_level: int) -> int:
+    """Submits AI action hashes to AuditRegistry and returns the entryId."""
+    if not BLOCKCHAIN_AVAILABLE or not audit_registry: 
+        return -1
+    
+    try:
+        def to_b32(h): return Web3.to_bytes(hexstr=h)
+        tx_hash = audit_registry.functions.logAction(
+            to_b32(instruction_hash),
+            to_b32(context_hash),
+            to_b32(reasoning_hash),
+            to_b32(action_hash),
+            risk_level
+        ).transact()
+        receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
+        logs = audit_registry.events.ActionLogged().process_receipt(receipt)
+        return logs[0]['args']['entryId'] if logs else -1
+    except Exception as e:
+        logger.error(f"log_ai_action failed: {e}")
+        return -1
+
+def record_batch_root(merkle_root: str) -> int:
+    """Submits a Merkle root for a batch of events to AuditRegistry."""
+    if not BLOCKCHAIN_AVAILABLE or not audit_registry: 
+        return -1
+    
+    try:
+        tx_hash = audit_registry.functions.recordBatchRoot(
+            Web3.to_bytes(hexstr=merkle_root)
+        ).transact()
+        receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
+        logs = audit_registry.events.BatchLogged().process_receipt(receipt)
+        return logs[0]['args']['batchId'] if logs else -1
+    except Exception as e:
+        logger.error(f"record_batch_root failed: {e}")
+        return -1
+
+def record_posture_snapshot(merkle_root: str, score: int) -> str:
+    """Submits the daily Merkle root to PostureRegistry."""
+    if not BLOCKCHAIN_AVAILABLE or not posture_registry: 
+        return ""
+    
+    try:
+        tx_hash = posture_registry.functions.recordSnapshot(
+            Web3.to_bytes(hexstr=merkle_root),
+            score
+        ).transact()
+        w3.eth.wait_for_transaction_receipt(tx_hash)
+        return tx_hash.hex()
+    except Exception as e:
+        logger.error(f"record_posture_snapshot failed: {e}")
+        return ""
+
+================================================================================
+FILE: backend/notarizer.py
+================================================================================
+import os
+import json
+import time
+import asyncio
+import hashlib
+import logging
+from datetime import datetime
+from pathlib import Path
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+import hasher
+import blockchain
+
+# Module level lock for sequence integrity
+# Single worker only — see startup constraint
+sequence_lock = asyncio.Lock()
+
+class Notarizer:
+    def __init__(self, queue: asyncio.Queue, audit_log_dir: str = "backend/audit_log"):
+        self.queue = queue
+        self.audit_log_dir = Path(audit_log_dir)
+        self.audit_log_dir.mkdir(parents=True, exist_ok=True)
+        self.scheduler = AsyncIOScheduler()
+        
+        self.sequence_file = self.audit_log_dir / "sequence.json"
+        self.gap_alerts_file = self.audit_log_dir / "gap_alerts.json"
+        
+        self.last_event_id = self._load_last_id()
+        self.last_committed_batch_timestamp = 0
+        self.gap_detected = False
+        self.gap_count = 0
+
+    def _load_last_id(self) -> int:
+        if self.sequence_file.exists():
+            try:
+                with open(self.sequence_file, "r") as f:
+                    return json.load(f).get("last_event_id", -1)
+            except Exception:
+                pass
+        return -1
+
+    def _save_last_id(self, event_id: int):
+        temp_file = self.sequence_file.with_suffix(".tmp")
+        data = {"last_event_id": event_id, "updated_at": int(time.time())}
+        with open(temp_file, "w") as f:
+            json.dump(data, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_file, self.sequence_file)
+
+    async def get_next_id(self) -> int:
+        async with sequence_lock:
+            self.last_event_id += 1
+            self._save_last_id(self.last_event_id)
+            return self.last_event_id
+
+    def start(self):
+        # Fix 3: AsyncIOScheduler with max_instances=1 and coalesce=True
+        self.scheduler.add_job(self.run_batch, 'interval', seconds=60, max_instances=1, coalesce=True)
+        self.scheduler.start()
+        print("[Notarizer] Background service started.")
+
+    async def run_batch(self):
+        # Fix 4: Job is async def and awaited by AsyncIOScheduler
+        events = []
+        while not self.queue.empty():
+            events.append(await self.queue.get())
+
+        if not events:
+            return
+
+        events.sort(key=lambda x: x['event_id'])
+        
+        # Gap Detection
+        batch_ids = [e['event_id'] for e in events]
+        for i in range(len(batch_ids) - 1):
+            if batch_ids[i+1] != batch_ids[i] + 1:
+                self._log_gap(batch_ids[i] + 1, batch_ids[i+1], len(events))
+
+        # Fix 8: Second-preimage protection with Domain Separation
+        event_hashes = []
+        for event in events:
+            payload = (
+                f"{event['event_id']}"
+                f"{event['instruction_hash']}"
+                f"{event['context_hash']}"
+                f"{event['reasoning_hash']}"
+                f"{event['action_hash']}"
+                f"{event['risk_level']}"
+                f"{event['timestamp']}"
+                f"{event['agent_name']}"
+            )
+            # Leaf: sha256(0x00 + data)
+            event_hash = "0x" + hashlib.sha256(b"\x00" + payload.encode()).hexdigest()
+            event['event_hash'] = event_hash 
+            event_hashes.append(event_hash)
+
+        merkle_root = self._build_merkle_root(event_hashes)
+        
+        try:
+            batch_id = blockchain.record_batch_root(merkle_root)
+            self.last_committed_batch_timestamp = int(time.time())
+        except Exception as e:
+            batch_id = -1
+
+        timestamp = int(time.time())
+        batch_data = {
+            "batch_id": batch_id,
+            "merkle_root": merkle_root,
+            "timestamp": timestamp,
+            "event_count": len(events),
+            "events": events
+        }
+        
+        file_path = self.audit_log_dir / f"batch_{timestamp}.json"
+        with open(file_path, "w") as f:
+            json.dump(batch_data, f, indent=4)
+
+    def _build_merkle_root(self, leaves: list[str]) -> str:
+        if not leaves:
+            return "0x" + hashlib.sha256(b"\x00").hexdigest()
+
+        # Convert hex to raw bytes
+        current_level = [bytes.fromhex(l.replace('0x', '')) for l in leaves]
+
+        while len(current_level) > 1:
+            next_level = []
+            for i in range(0, len(current_level), 2):
+                left = current_level[i]
+                right = current_level[i + 1] if i + 1 < len(current_level) else left
+                # Node: sha256(0x01 + left + right)
+                next_level.append(hashlib.sha256(b"\x01" + left + right).digest())
+            current_level = next_level
+
+        return "0x" + current_level[0].hex()
+
+    def _log_gap(self, expected_id: int, found_id: int, batch_size: int):
+        self.gap_detected = True
+        self.gap_count += 1
+        alert = {"expected": expected_id, "found": found_id, "ts": int(time.time()), "size": batch_size}
+        
+        alerts = []
+        if self.gap_alerts_file.exists():
+            try:
+                with open(self.gap_alerts_file, "r") as f: alerts = json.load(f)
+            except Exception: pass
+        alerts.append(alert)
+        
+        temp_file = self.gap_alerts_file.with_suffix(".tmp")
+        with open(temp_file, "w") as f: json.dump(alerts, f, indent=4)
+        os.replace(temp_file, self.gap_alerts_file)
+
+    def get_sequence_status(self) -> dict:
+        return {
+            "last_committed_event_id": self.last_event_id,
+            "last_committed_batch_timestamp": self.last_committed_batch_timestamp,
+            "any_gaps_detected": self.gap_detected,
+            "gap_count": self.gap_count
+        }
+
+    def get_event_proof(self, event_hash: str):
+        for log_file in sorted(self.audit_log_dir.glob("batch_*.json"), reverse=True):
+            with open(log_file, "r") as f:
+                batch = json.load(f)
+            hashes = [e["event_hash"] for e in batch["events"]]
+            if event_hash in hashes:
+                index = hashes.index(event_hash)
+                proof = self._calculate_merkle_proof(hashes, index)
+                return {"event": batch["events"][index], "merkle_root": batch["merkle_root"], "proof": proof}
+        return None
+
+    def _calculate_merkle_proof(self, leaves: list[str], index: int) -> list[dict]:
+        proof = []
+        current_level = [bytes.fromhex(l.replace('0x', '')) for l in leaves]
+        curr_idx = index
+        while len(current_level) > 1:
+            next_level = []
+            for i in range(0, len(current_level), 2):
+                left = current_level[i]
+                right = current_level[i + 1] if i + 1 < len(current_level) else left
+                if i == curr_idx or i + 1 == curr_idx:
+                    sibling = right if i == curr_idx else left
+                    direction = "right" if i == curr_idx else "left"
+                    proof.append({"hash": "0x" + sibling.hex(), "direction": direction})
+                next_level.append(hashlib.sha256(b"\x01" + left + right).digest())
+            current_level = next_level
+            curr_idx //= 2
+        return proof
+
+================================================================================
+FILE: backend/hasher.py
+================================================================================
+import hashlib
+import json
+
+def sha256(data: str) -> str:
+    """Returns the SHA-256 hash of a string as a hex string."""
+    return hashlib.sha256(data.encode('utf-8')).hexdigest()
+
+def sha256_bytes(data: bytes) -> str:
+    """Returns the SHA-256 hash of bytes as a hex string."""
+    return hashlib.sha256(data).hexdigest()
+
+def to_bytes32(hex_str: str) -> bytes:
+    """Converts a hex string (with or without '0x') to a 32-byte representation."""
+    if hex_str.startswith('0x'):
+        hex_str = hex_str[2:]
+    return bytes.fromhex(hex_str)
+
+def build_merkle_root(leaves: list[str]) -> str:
+    """
+    Builds a simple Merkle Tree root from a list of hex string hashes.
+    If the number of leaves is odd, the last leaf is duplicated to balance the tree.
+    """
+    if not leaves:
+        return sha256("")
+
+    # Convert leaves to bytes for hashing
+    current_level = [bytes.fromhex(leaf.replace('0x', '')) for leaf in leaves]
+
+    while len(current_level) > 1:
+        next_level = []
+        for i in range(0, len(current_level), 2):
+            left = current_level[i]
+            # If there's no right child, duplicate the left child
+            right = current_level[i + 1] if i + 1 < len(current_level) else left
+            
+            # Hash the concatenated pair
+            combined = left + right
+            next_level.append(hashlib.sha256(combined).digest())
+            
+        current_level = next_level
+
+    return "0x" + current_level[0].hex()
+
+================================================================================
+FILE: backend/agents/security_agent.py
+================================================================================
+import sys
+import time
+import asyncio
+import logging
+from pathlib import Path
+from pydantic import BaseModel, Field
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.prompts import PromptTemplate
+
+sys.path.append(str(Path(__file__).parent.parent))
+import hasher
+
+logger = logging.getLogger("SecurityAgent")
+
+class SecurityDecision(BaseModel):
+    reasoning: str = Field(description="Brief explanation of why this is or isn't a threat.")
+    action: str = Field(description="The exact action to take (e.g., 'block ip', 'isolate host', 'ignore')")
+    risk_level: int = Field(description="Risk level from 0 to 3: 0 (Safe), 1 (Low), 2 (High), 3 (Critical).", ge=0, le=3)
+
+class SecurityAgent:
+    def __init__(self):
+        # Fix 5: Graceful LLM initialization
+        try:
+            self.llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0.2).with_structured_output(SecurityDecision)
+        except Exception as e:
+            logger.critical(f"LLM init failed: {e}")
+            self.llm = None
+        
+        self.prompt = PromptTemplate.from_template(
+            "You are an autonomous AI SOC Agent defending a corporate network.\n"
+            "Threat Alert: {alert}\n"
+            "System Context: {context}\n"
+            "Analyze the threat and provide your decision."
+        )
+        self.chain = self.prompt | self.llm if self.llm else None
+
+    async def handle_alert(self, alert_text: str, system_context: str, queue: asyncio.Queue, notarizer) -> dict:
+        if not self.llm:
+            return {"success": False, "error": "LLM unavailable — check GOOGLE_API_KEY"}
+            
+        print(f"[Security Agent] Analyzing alert: {alert_text}")
+        try:
+            decision_obj = await self.chain.ainvoke({"alert": alert_text, "context": system_context})
+            event_id = await notarizer.get_next_id()
+            
+            event = {
+                "event_id": event_id,
+                "instruction_hash": hasher.sha256(self.prompt.template),
+                "context_hash": hasher.sha256(system_context),
+                "reasoning_hash": hasher.sha256(decision_obj.reasoning),
+                "action_hash": hasher.sha256(decision_obj.action),
+                "risk_level": decision_obj.risk_level,
+                "timestamp": int(time.time()),
+                "agent_name": "SecurityAgent"
+            }
+            await queue.put(event)
+            return {
+                "success": True,
+                "event_id": event_id,
+                "action": decision_obj.action,
+                "reasoning": decision_obj.reasoning,
+                "risk_level": decision_obj.risk_level,
+                "notarization": "queued"
+            }
+        except Exception as e:
+            logger.error(f"Failed to process decision: {e}")
+            return {"success": False, "error": str(e)}
+
+================================================================================
+FILE: backend/agents/anomaly_detector.py
+================================================================================
+import sys
+import time
+import asyncio
+import logging
+from pathlib import Path
+from pydantic import BaseModel, Field
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.prompts import PromptTemplate
+
+sys.path.append(str(Path(__file__).parent.parent))
+import hasher
+
+logger = logging.getLogger("AnomalyDetector")
+
+class AnomalyReport(BaseModel):
+    anomaly_detected: bool = Field(description="Boolean indicating if an anomaly was found")
+    reasoning: str = Field(description="Explanation of findings")
+    recommended_action: str = Field(description="The exact action to take (e.g., 'audit admin accounts', 'none')")
+
+class AnomalyDetector:
+    def __init__(self):
+        try:
+            self.llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0.1).with_structured_output(AnomalyReport)
+        except Exception as e:
+            logger.critical(f"LLM init failed: {e}")
+            self.llm = None
+            
+        self.prompt = PromptTemplate.from_template(
+            "You are an AI Anomaly Detector. Review these daily security logs:\n"
+            "{daily_logs}\n"
+            "Look for patterns that indicate a stealthy intrusion or compromised hygiene and provide your report."
+        )
+        self.chain = self.prompt | self.llm if self.llm else None
+
+    async def analyze_daily_logs(self, logs_json: str, queue: asyncio.Queue, notarizer) -> dict:
+        if not self.llm:
+            return {"success": False, "error": "LLM unavailable — check GOOGLE_API_KEY"}
+            
+        print("[Anomaly Detector] Analyzing daily logs...")
+        try:
+            decision_obj = await self.chain.ainvoke({"daily_logs": logs_json})
+            
+            if decision_obj.anomaly_detected:
+                event_id = await notarizer.get_next_id()
+                event = {
+                    "event_id": event_id,
+                    "instruction_hash": hasher.sha256(self.prompt.template),
+                    "context_hash": hasher.sha256(logs_json),
+                    "reasoning_hash": hasher.sha256(decision_obj.reasoning),
+                    "action_hash": hasher.sha256(decision_obj.recommended_action),
+                    "risk_level": 2,
+                    "timestamp": int(time.time()),
+                    "agent_name": "AnomalyDetector"
+                }
+                await queue.put(event)
+                print(f"[Anomaly Detector] Event #{event_id} queued.")
+                
+            return {
+                "success": True,
+                "anomaly_detected": decision_obj.anomaly_detected,
+                "reasoning": decision_obj.reasoning,
+                "recommended_action": decision_obj.recommended_action,
+                "notarization": "queued" if decision_obj.anomaly_detected else "none"
+            }
+        except Exception as e:
+            logger.error(f"Failed to process logs: {e}")
+            return {"success": False, "error": str(e)}
+
+================================================================================
+FILE: backend/agents/fraud_analyzer.py
+================================================================================
+import sys
+import time
+import asyncio
+import logging
+from pathlib import Path
+from pydantic import BaseModel, Field
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.prompts import PromptTemplate
+
+sys.path.append(str(Path(__file__).parent.parent))
+import hasher
+
+logger = logging.getLogger("FraudAnalyzer")
+
+class FraudAnalysis(BaseModel):
+    fraud_score: int = Field(description="Fraud probability score from 0 to 100", ge=0, le=100)
+    reasoning: str = Field(description="Detailed explanation of findings")
+
+class FraudAnalyzer:
+    def __init__(self):
+        try:
+            self.llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0.1).with_structured_output(FraudAnalysis)
+        except Exception as e:
+            logger.critical(f"LLM init failed: {e}")
+            self.llm = None
+            
+        self.prompt = PromptTemplate.from_template(
+            "You are an AI Cyber Insurance Fraud Investigator.\n"
+            "Claim Data: {claim}\n"
+            "Historical Security Posture: {posture}\n"
+            "Analyze for inconsistencies or intentional negligence and provide a fraud score."
+        )
+        self.chain = self.prompt | self.llm if self.llm else None
+
+    async def analyze_claim(self, claim_id: int, claim_text: str, posture_data: str, queue: asyncio.Queue, notarizer) -> dict:
+        if not self.llm:
+            return {"success": False, "error": "LLM unavailable — check GOOGLE_API_KEY"}
+            
+        print(f"[Fraud Analyzer] Analyzing claim #{claim_id}...")
+        try:
+            decision_obj = await self.chain.ainvoke({"claim": claim_text, "posture": posture_data})
+            
+            event_id = await notarizer.get_next_id()
+            event = {
+                "event_id": event_id,
+                "instruction_hash": hasher.sha256(self.prompt.template),
+                "context_hash": hasher.sha256(claim_text + posture_data),
+                "reasoning_hash": hasher.sha256(decision_obj.reasoning),
+                "action_hash": hasher.sha256(str(decision_obj.fraud_score)),
+                "risk_level": 1,
+                "timestamp": int(time.time()),
+                "agent_name": "FraudAnalyzer"
+            }
+            await queue.put(event)
+            
+            return {
+                "success": True,
+                "fraud_score": decision_obj.fraud_score,
+                "reasoning": decision_obj.reasoning,
+                "notarization": "queued"
+            }
+        except Exception as e:
+            logger.error(f"Failed to analyze claim: {e}")
+            return {"success": False, "error": str(e)}
+
+================================================================================
+FILE: frontend/src/App.jsx
+================================================================================
+import React from 'react';
+import Sidebar from './components/Sidebar';
+import SecurityFeed from './components/SecurityFeed';
+import PostureScore from './components/PostureScore';
+import ClaimsWidget from './components/ClaimsWidget';
+
+function App() {
+  return (
+    <div style={{ display: 'flex', minHeight: '100vh', padding: '1.5rem', gap: '1.5rem' }}>
+      
+      {/* Sidebar Navigation */}
+      <Sidebar />
+
+      {/* Main Content Area */}
+      <main style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+        
+        {/* Header */}
+        <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+          <div>
+            <h1 style={{ margin: 0, fontSize: '2rem', textShadow: '0 0 20px rgba(255,255,255,0.1)' }}>Global Security Command</h1>
+            <p style={{ margin: '0.25rem 0 0 0', color: 'var(--text-muted)' }}>Hybrid AI & Blockchain Architecture</p>
+          </div>
+          
+          <div style={{ display: 'flex', gap: '1rem' }}>
+            <div className="glass-panel" style={{ padding: '0.75rem 1.5rem', display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <div style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: 'var(--accent-blue)', boxShadow: '0 0 8px var(--accent-blue-glow)' }}></div>
+              <span style={{ fontSize: '0.875rem', fontWeight: 600 }}>Hardhat Local Node Active</span>
+            </div>
+          </div>
+        </header>
+
+        {/* Dashboard Grid */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 350px', gap: '1.5rem', flex: 1 }}>
+          
+          {/* Left Column: Live Feed */}
+          <SecurityFeed />
+
+          {/* Right Column: Widgets */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+            <PostureScore />
+            <ClaimsWidget />
+          </div>
+
+        </div>
+      </main>
+
+    </div>
+  );
+}
+
+export default App;
+
+================================================================================
+FILE: frontend/src/api/backend.js
+================================================================================
+import axios from 'axios';
+
+const API_URL = 'http://127.0.0.1:8000';
+
+export const analyzeSecurityAlert = async (alert, context) => {
+  try {
+    const response = await axios.post(`${API_URL}/api/analyze-alert`, {
+      alert,
+      context
+    });
+    return response.data;
+  } catch (error) {
+    console.error("Error analyzing alert:", error);
+    throw error;
+  }
+};
+
+export const analyzeDailyLogs = async (logs) => {
+  try {
+    const response = await axios.post(`${API_URL}/api/analyze-daily-logs`, {
+      daily_logs: JSON.stringify(logs)
+    });
+    return response.data;
+  } catch (error) {
+    console.error("Error analyzing logs:", error);
+    throw error;
+  }
+};
+
+export const processClaim = async (claimId, claimData, posture) => {
+  try {
+    const response = await axios.post(`${API_URL}/api/analyze-claim`, {
+      claim_id: claimId,
+      claim_data: claimData,
+      historical_posture: posture
+    });
+    return response.data;
+  } catch (error) {
+    console.error("Error processing claim:", error);
+    throw error;
+  }
+};
+
+================================================================================
+FILE: frontend/src/api/blockchain.js
+================================================================================
+import { ethers } from 'ethers';
+
+// Connect to the local Hardhat node
+const provider = new ethers.JsonRpcProvider('http://127.0.0.1:8545');
+
+// In a real app, we'd fetch the ABIs from the compiled contracts.
+// For the UI, we only need the view functions to read data.
+const POSTURE_ABI = [
+  "function getLatestScore() public view returns (uint256)",
+  "function getAverageScore(uint256 daysCount) public view returns (uint256)"
+];
+
+const AUDIT_ABI = [
+  "function getAuditDetails(uint256 entryId) public view returns (bytes32 actionHash, uint256 timestamp, address agent)",
+  "event ActionLogged(uint256 indexed entryId, bytes32 indexed actionHash, uint256 timestamp, address agent)"
+];
+
+export const getPostureScore = async (postureAddress) => {
+  try {
+    const contract = new ethers.Contract(postureAddress, POSTURE_ABI, provider);
+    const score = await contract.getLatestScore();
+    return Number(score);
+  } catch (error) {
+    console.error("Error fetching posture score:", error);
+    return null;
+  }
+};
+
+export const getAuditDetails = async (auditAddress, entryId) => {
+  try {
+    const contract = new ethers.Contract(auditAddress, AUDIT_ABI, provider);
+    const details = await contract.getAuditDetails(entryId);
+    return {
+      actionHash: details[0],
+      timestamp: new Date(Number(details[1]) * 1000).toLocaleString(),
+      agent: details[2]
+    };
+  } catch (error) {
+    console.error("Error fetching audit details:", error);
+    return null;
+  }
+};
+
+================================================================================
+FILE: frontend/src/components/Dashboard.jsx
+================================================================================
+FILE NOT FOUND
+
+================================================================================
+FILE: frontend/src/components/ThreatFeed.jsx
+================================================================================
+FILE NOT FOUND
+
+================================================================================
+FILE: frontend/src/components/ClaimsAudit.jsx
+================================================================================
+FILE NOT FOUND
+
+================================================================================
+FILE: hardhat.config.js
+================================================================================
+import "@nomicfoundation/hardhat-toolbox";
+import "dotenv/config";
+
+/** @type import('hardhat/config').HardhatUserConfig */
+const config = {
+  solidity: "0.8.28",
+  networks: {
+    hardhat: {
+      chainId: 1337
+    },
+    localhost: {
+      url: "http://127.0.0.1:8545",
+      chainId: 1337
+    }
+  }
+};
+
+export default config;
+
+================================================================================
+FILE: scripts/deploy.js
+================================================================================
+import hardhat from "hardhat";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+async function main() {
+  console.log("Starting deployment...");
+
+  const PolicyEngine = await hardhat.ethers.getContractFactory("PolicyEngine");
+  const policyEngine = await PolicyEngine.deploy();
+  await policyEngine.waitForDeployment();
+  const policyAddress = await policyEngine.getAddress();
+
+  const PostureRegistry = await hardhat.ethers.getContractFactory("PostureRegistry");
+  const postureRegistry = await PostureRegistry.deploy();
+  await postureRegistry.waitForDeployment();
+  const postureAddress = await postureRegistry.getAddress();
+
+  const AuditRegistry = await hardhat.ethers.getContractFactory("AuditRegistry");
+  const auditRegistry = await AuditRegistry.deploy();
+  await auditRegistry.waitForDeployment();
+  const auditAddress = await auditRegistry.getAddress();
+
+  const Governance = await hardhat.ethers.getContractFactory("Governance");
+  const governance = await Governance.deploy(auditAddress);
+  await governance.waitForDeployment();
+  const govAddress = await governance.getAddress();
+
+  const ClaimsProcessor = await hardhat.ethers.getContractFactory("ClaimsProcessor");
+  const claimsProcessor = await ClaimsProcessor.deploy(postureAddress, policyAddress);
+  await claimsProcessor.waitForDeployment();
+  const claimsAddress = await claimsProcessor.getAddress();
+
+  // Fix 7: Write addresses to backend/deployed_addresses.json
+  const addresses = {
+    AuditRegistry: auditAddress,
+    Governance: govAddress,
+    PostureRegistry: postureAddress,
+    PolicyEngine: policyAddress,
+    ClaimsProcessor: claimsAddress
+  };
+
+  const outputPath = path.join(__dirname, "..", "backend", "deployed_addresses.json");
+  fs.writeFileSync(outputPath, JSON.stringify(addresses, null, 2));
+  console.log(`Addresses saved to ${outputPath}`);
+
+  // Update .env
+  let envContent = fs.readFileSync(".env", "utf8");
+  envContent = envContent.replace(/AUDIT_REGISTRY_ADDRESS=.*/, `AUDIT_REGISTRY_ADDRESS=${auditAddress}`);
+  envContent = envContent.replace(/GOVERNANCE_ADDRESS=.*/, `GOVERNANCE_ADDRESS=${govAddress}`);
+  envContent = envContent.replace(/POSTURE_REGISTRY_ADDRESS=.*/, `POSTURE_REGISTRY_ADDRESS=${postureAddress}`);
+  envContent = envContent.replace(/POLICY_ENGINE_ADDRESS=.*/, `POLICY_ENGINE_ADDRESS=${policyAddress}`);
+  envContent = envContent.replace(/CLAIMS_PROCESSOR_ADDRESS=.*/, `CLAIMS_PROCESSOR_ADDRESS=${claimsAddress}`);
+  fs.writeFileSync(".env", envContent);
+  console.log("Successfully updated .env and deployed_addresses.json");
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
+
+================================================================================
+FILE: package.json
+================================================================================
+{
+  "name": "blockchain-security-hybrid",
+  "version": "1.0.0",
+  "description": "AI-Driven Security Operations with Blockchain Accountability & Insurance Verification",
+  "main": "index.js",
+  "scripts": {
+    "test": "hardhat test",
+    "sync-abis": "xcopy /E /I /Y artifacts\\contracts\\*\\*.json frontend\\src\\abis\\"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "hardhat": "^2.28.6"
+  },
+  "dependencies": {
+    "dotenv": "^17.4.2"
+  },
+  "type": "module"
+}
+
+================================================================================
+FILE: backend/requirements.txt
+================================================================================
+
+
+================================================================================
+FILE: .env
+================================================================================
+# AI and API Keys
+GOOGLE_API_KEY=AIzaSyAJBo-SBCRzBMKf9xzuvwWGZUT528iCF_o
+
+# Blockchain Configuration
+HARDHAT_RPC_URL=http://127.0.0.1:8545
+
+# Smart Contract Addresses (To be filled after deployment)
+AUDIT_REGISTRY_ADDRESS=0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0
+GOVERNANCE_ADDRESS=0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9
+POSTURE_REGISTRY_ADDRESS=0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512
+POLICY_ENGINE_ADDRESS=0x5FbDB2315678afecb367f032d93F642f64180aa3
+CLAIMS_PROCESSOR_ADDRESS=0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9
+
+================================================================================
+FILE: backend/deployed_addresses.json
+================================================================================
+{
+  "AuditRegistry": "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
+  "Governance": "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9",
+  "PostureRegistry": "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
+  "PolicyEngine": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+  "ClaimsProcessor": "0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9"
+}
+
+================================================================================
+FILE: backend/test_all.py
+================================================================================
+import requests
+import json
+import time
+
+BASE_URL = "http://127.0.0.1:8000"
+
+def test_security_alert():
+    print("\n--- Testing Security Alert ---")
+    payload = {
+        "alert": "Suspicious login from 192.168.1.50 (Russia)",
+        "context": "Admin account accessed at 3 AM from unusual location."
+    }
+    res = requests.post(f"{BASE_URL}/api/analyze-alert", json=payload)
+    print(res.status_code, res.json())
+
+def test_daily_logs():
+    print("\n--- Testing Daily Logs ---")
+    payload = {
+        "daily_logs": json.dumps([
+            {"ts": 1714560000, "event": "Successful login - admin"},
+            {"ts": 1714560100, "event": "File accessed: /etc/shadow"},
+            {"ts": 1714560200, "event": "Exfiltration: 50MB to external IP"}
+        ])
+    }
+    res = requests.post(f"{BASE_URL}/api/analyze-daily-logs", json=payload)
+    print(res.status_code, res.json())
+
+def test_claim():
+    print("\n--- Testing Insurance Claim ---")
+    payload = {
+        "claim_id": 1,
+        "claim_data": "Ransomware attack on database server. 2 BTC demanded.",
+        "historical_posture": "Daily hygiene scores: 95, 98, 92, 94. Firewall active."
+    }
+    res = requests.post(f"{BASE_URL}/api/analyze-claim", json=payload)
+    print(res.status_code, res.json())
+
+def test_status():
+    print("\n--- Testing System Status ---")
+    res = requests.get(f"{BASE_URL}/api/sequence-status")
+    print(res.json())
+
+if __name__ == "__main__":
+    try:
+        test_security_alert()
+        test_daily_logs()
+        test_claim()
+        time.sleep(2) # Let some events queue
+        test_status()
+    except Exception as e:
+        print(f"Connection failed: {e}. Is the server running?")
+
+================================================================================
+FILE: scripts/test-connection.js
+================================================================================
+import hardhat from "hardhat";
+import dotenv from "dotenv";
+dotenv.config();
+
+async function main() {
+  const auditAddress = process.env.AUDIT_REGISTRY_ADDRESS;
+  console.log(`Testing connection to AuditRegistry at: ${auditAddress}`);
+
+  // Get the contract instance at the deployed address
+  const AuditRegistry = await hardhat.ethers.getContractAt("AuditRegistry", auditAddress);
+
+  // Call a read function (get entryCount)
+  const count = await AuditRegistry.entryCount();
+  console.log(`✅ Success! The AuditRegistry is alive.`);
+  console.log(`Current Entry Count: ${count.toString()}`);
+}
+
+main().catch((error) => {
+  console.error("❌ Connection failed!");
+  console.error(error);
+  process.exitCode = 1;
+});
+
+================================================================================
+FILE: frontend/src/components/SecurityFeed.jsx
+================================================================================
+import React, { useState, useEffect } from 'react';
+import { analyzeSecurityAlert } from '../api/backend';
+
+const SecurityFeed = () => {
+  const [alerts, setAlerts] = useState([
+    { id: 1, type: 'Info', msg: 'System initialized', ts: 'Just now' },
+    { id: 2, type: 'Warning', msg: 'High CPU on Node-A', ts: '2m ago' }
+  ]);
+  
+  const [input, setInput] = useState("");
+  const [analyzing, setAnalyzing] = useState(false);
+
+  const handleSimulate = async () => {
+    if(!input) return;
+    setAnalyzing(true);
+    try {
+      const res = await analyzeSecurityAlert(input, "Manual user simulation via dashboard.");
+      const newAlert = {
+        id: Date.now(),
+        type: res.risk_level >= 2 ? 'Critical' : 'Alert',
+        msg: `${res.action}: ${res.reasoning}`,
+        ts: 'Just now'
+      };
+      setAlerts(prev => [newAlert, ...prev]);
+      setInput("");
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setAnalyzing(false);
+    }
+  };
+
+  return (
+    <div className="glass-panel" style={{ padding: '1.5rem', display: 'flex', flexDirection: 'column' }}>
+      <h3 style={{ marginTop: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
+        <span style={{ color: 'var(--accent-red)' }}>●</span> Live Security Feed
+      </h3>
+      
+      <div style={{ flex: 1, overflowY: 'auto', marginBottom: '1rem', maxHeight: '400px' }}>
+        {alerts.map(a => (
+          <div key={a.id} className="feed-item" style={{ marginBottom: '0.75rem', padding: '0.75rem', borderRadius: '8px', borderLeft: `4px solid ${a.type === 'Critical' ? 'var(--accent-red)' : 'var(--accent-blue)'}` }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', marginBottom: '4px', opacity: 0.7 }}>
+              <span>{a.type}</span>
+              <span>{a.ts}</span>
+            </div>
+            <div style={{ fontSize: '0.9rem' }}>{a.msg}</div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display: 'flex', gap: '0.5rem' }}>
+        <input 
+          value={input}
+          onChange={e => setInput(e.target.value)}
+          placeholder="Simulate threat alert..."
+          style={{ flex: 1, padding: '0.75rem', borderRadius: '8px', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', color: 'white' }}
+        />
+        <button 
+          onClick={handleSimulate}
+          disabled={analyzing}
+          style={{ padding: '0.75rem 1.5rem', borderRadius: '8px', background: 'var(--accent-blue)', color: 'white', fontWeight: 600, border: 'none', cursor: 'pointer' }}
+        >
+          {analyzing ? 'Analyzing...' : 'Execute'}
+        </button>
+      </div>
+    </div>
+  );
+};
+
+export default SecurityFeed;
+
+================================================================================
+FILE: frontend/src/components/ClaimsWidget.jsx
+================================================================================
+import React, { useState } from 'react';
+
+const ClaimsWidget = () => {
+  return (
+    <div className="glass-panel" style={{ padding: '1.5rem' }}>
+      <h3 style={{ marginTop: 0 }}>Insurance Claims</h3>
+      <p style={{ fontSize: '0.875rem', color: 'var(--text-muted)' }}>Automated adjudicator status</p>
+      
+      <div style={{ marginTop: '1rem' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '1rem' }}>
+          <span>Pending Claims</span>
+          <span style={{ fontWeight: 600 }}>0</span>
+        </div>
+        
+        <button style={{ width: '100%', padding: '0.75rem', borderRadius: '8px', background: 'transparent', border: '1px solid var(--accent-blue)', color: 'var(--accent-blue)', fontWeight: 600 }}>
+          View Claims History
+        </button>
+      </div>
+    </div>
+  );
+};
+
+export default ClaimsWidget;
+
+================================================================================
+FILE: frontend/src/components/PostureScore.jsx
+================================================================================
+import React from 'react';
+
+const PostureScore = () => {
+  return (
+    <div className="glass-panel" style={{ padding: '1.5rem', textAlign: 'center' }}>
+      <h3 style={{ marginTop: 0 }}>Security Posture</h3>
+      
+      <div style={{ position: 'relative', width: '120px', height: '120px', margin: '1.5rem auto' }}>
+        <svg viewBox="0 0 36 36" style={{ transform: 'rotate(-90deg)', width: '100%', height: '100%' }}>
+          <path
+            d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
+            fill="none"
+            stroke="rgba(255,255,255,0.05)"
+            strokeWidth="3"
+          />
+          <path
+            d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
+            fill="none"
+            stroke="var(--accent-blue)"
+            strokeWidth="3"
+            strokeDasharray="94, 100"
+            style={{ filter: 'drop-shadow(0 0 5px var(--accent-blue-glow))' }}
+          />
+        </svg>
+        <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)' }}>
+          <div style={{ fontSize: '1.5rem', fontWeight: 800 }}>94</div>
+          <div style={{ fontSize: '0.625rem', opacity: 0.6 }}>SHS</div>
+        </div>
+      </div>
+
+      <div style={{ fontSize: '0.875rem', color: 'var(--accent-green)', fontWeight: 600 }}>
+        Optimal Hygiene
+      </div>
+    </div>
+  );
+};
+
+export default PostureScore;
+
+================================================================================
+FILE: frontend/src/components/Sidebar.jsx
+================================================================================
+import React from 'react';
+
+const Sidebar = () => {
+  return (
+    <aside style={{ width: '240px', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+      <div className="nav-item active">Dashboard</div>
+      <div className="nav-item">Agents & AI</div>
+      <div className="nav-item">Blockchain Logs</div>
+      <div className="nav-item">Governance</div>
+      <div className="nav-item">Policies</div>
+      <div className="nav-item" style={{ marginTop: 'auto' }}>Settings</div>
+    </aside>
+  );
+};
+
+export default Sidebar;
+
+================================================================================
+FILE: .gitignore
+================================================================================
+# Environment variables
+.env
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Hardhat
+artifacts/
+cache/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# Frontend build
+frontend/dist/
+frontend/node_modules/
+
+================================================================================
+FILE: .python-version
+================================================================================
+3.12.0
+
+================================================================================
+FILE: frontend/package.json
+================================================================================
+{
+  "name": "frontend",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "lint": "eslint .",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "axios": "^1.15.2",
+    "ethers": "^6.16.0",
+    "lucide-react": "^1.14.0",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5",
+    "recharts": "^3.8.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.1",
+    "eslint": "^10.2.1",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.2",
+    "globals": "^17.5.0",
+    "vite": "^8.0.10"
+  }
+}
+
+================================================================================
+FILE: frontend/vite.config.js
+================================================================================
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+
+// https://vite.dev/config/
+export default defineConfig({
+  plugins: [react()],
+})
+
+================================================================================
+FILE: snapshot.py
+================================================================================
+import os
+import subprocess
+
+def generate_tree(dir_path, prefix=""):
+    exclude = {'.venv', 'node_modules', '.git', '__pycache__', '.pytest_cache', 'cache', 'artifacts'}
+    try:
+        entries = sorted(os.listdir(dir_path))
+    except Exception:
+        return ""
+    
+    entries = [e for e in entries if e not in exclude]
+    tree_str = ""
+    for i, entry in enumerate(entries):
+        is_last = (i == len(entries) - 1)
+        connector = "└── " if is_last else "├── "
+        tree_str += f"{prefix}{connector}{entry}\n"
+        
+        full_path = os.path.join(dir_path, entry)
+        if os.path.isdir(full_path):
+            extension = "    " if is_last else "│   "
+            tree_str += generate_tree(full_path, prefix=prefix+extension)
+    return tree_str
+
+def read_file(filepath):
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            return f.read()
+    except Exception as e:
+        return f"Error reading file: {e}"
+
+def main():
+    # Detect current directory
+    root_dir = os.path.dirname(os.path.abspath(__file__))
+    output = []
+    
+    output.append("# Project Code Review Snapshot\n")
+    output.append(f"Generated on: {subprocess.check_output(['date', '/t'], shell=True).decode().strip()}\n\n")
+    
+    output.append("## 1. Directory Structure\n```text\n")
+    output.append(f"Hybrid_Blockchain_Project\n")
+    output.append(generate_tree(root_dir))
+    output.append("```\n")
+    
+    output.append("## 2. Python Packages (pip freeze)\n```text\n")
+    # Check for venv in root or backend
+    pip_cmd = os.path.join(root_dir, ".venv", "Scripts", "pip.exe")
+    if not os.path.exists(pip_cmd):
+        pip_cmd = os.path.join(root_dir, "backend", ".venv", "Scripts", "pip.exe")
+    
+    if os.path.exists(pip_cmd):
+        res = subprocess.run([pip_cmd, "freeze"], capture_output=True, text=True)
+        output.append(res.stdout)
+    else:
+        output.append("pip command not found in .venv.")
+    output.append("```\n")
+    
+    output.append("## 3. Dependencies\n")
+    pkg1 = os.path.join(root_dir, "package.json")
+    if os.path.exists(pkg1):
+        output.append(f"### Root `package.json`\n```json\n{read_file(pkg1)}\n```\n")
+        
+    reqs = os.path.join(root_dir, "backend", "requirements.txt")
+    if os.path.exists(reqs):
+        output.append(f"### Backend `requirements.txt`\n```text\n{read_file(reqs)}\n```\n")
+        
+    pkg2 = os.path.join(root_dir, "frontend", "package.json")
+    if os.path.exists(pkg2):
+        output.append(f"### Frontend `frontend/package.json`\n```json\n{read_file(pkg2)}\n```\n")
+        
+    output.append("## 4. Smart Contracts (`contracts/*.sol`)\n")
+    contracts_dir = os.path.join(root_dir, "contracts")
+    if os.path.exists(contracts_dir):
+        for f in sorted(os.listdir(contracts_dir)):
+            if f.endswith('.sol'):
+                path = os.path.join(contracts_dir, f)
+                output.append(f"### `{f}`\n```solidity\n{read_file(path)}\n```\n")
+                
+    output.append("## 5. Python Backend (`backend/*.py`)\n")
+    # Dynamically find all python files in backend
+    backend_dir = os.path.join(root_dir, "backend")
+    if os.path.exists(backend_dir):
+        for root, dirs, files in os.walk(backend_dir):
+            if "__pycache__" in dirs: dirs.remove("__pycache__")
+            if ".venv" in dirs: dirs.remove(".venv")
+            for f in sorted(files):
+                if f.endswith('.py'):
+                    full_path = os.path.join(root, f)
+                    rel_path = os.path.relpath(full_path, root_dir).replace(os.sep, "/")
+                    output.append(f"### `{rel_path}`\n```python\n{read_file(full_path)}\n```\n")
+            
+    output.append("## 6. Hardhat Configuration\n")
+    hh_config = os.path.join(root_dir, "hardhat.config.js")
+    if os.path.exists(hh_config):
+        output.append(f"### `hardhat.config.js`\n```javascript\n{read_file(hh_config)}\n```\n")
+        
+    snapshot_path = os.path.join(root_dir, "snapshot.md")
+    with open(snapshot_path, "w", encoding='utf-8') as f:
+        f.write("".join(output))
+    
+    print(f"Snapshot updated successfully at: {snapshot_path}")
+
+if __name__ == "__main__":
+    main()
