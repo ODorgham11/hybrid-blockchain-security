@@ -7,20 +7,19 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 async function main() {
-  // Get the list of accounts provided by the Hardhat network
   const [deployer] = await hardhat.ethers.getSigners();
 
   console.log("Starting deployment...");
   console.log(`Using account: ${deployer.address} as the main Admin/Insurer`);
 
-  // 1. Deploy the new CyberToken FIRST
+  // 1. Deploy CyberToken (CIT)
   const CyberToken = await hardhat.ethers.getContractFactory("CyberToken");
-  const cyberToken = await CyberToken.deploy(hardhat.ethers.parseEther("1000000")); // 1 Million CIT
+  const cyberToken = await CyberToken.deploy(hardhat.ethers.parseEther("1000000"));
   await cyberToken.waitForDeployment();
   const tokenAddress = await cyberToken.getAddress();
   console.log(`✅ CyberToken deployed to: ${tokenAddress}`);
 
-  // 2. Deploy existing contracts
+  // 2. Deploy infrastructure
   const PolicyEngine = await hardhat.ethers.getContractFactory("PolicyEngine");
   const policyEngine = await PolicyEngine.deploy();
   await policyEngine.waitForDeployment();
@@ -45,25 +44,40 @@ async function main() {
   const govAddress = await governance.getAddress();
   console.log(`✅ Governance deployed to: ${govAddress}`);
 
-  // 3. Deploy ClaimsProcessor with all THREE arguments
+  // 3. Deploy ClaimsProcessor with FOUR arguments
+  console.log("Deploying ClaimsProcessor with 4 dependencies...");
   const ClaimsProcessor = await hardhat.ethers.getContractFactory("ClaimsProcessor");
-  const claimsProcessor = await ClaimsProcessor.deploy(postureAddress, policyAddress, tokenAddress);
+  const claimsProcessor = await ClaimsProcessor.deploy(
+    postureAddress,
+    policyAddress,
+    tokenAddress,
+    auditAddress
+  );
   await claimsProcessor.waitForDeployment();
   const claimsAddress = await claimsProcessor.getAddress();
   console.log(`✅ ClaimsProcessor deployed to: ${claimsAddress}`);
 
-  // 4. Fund the ClaimsProcessor with 50,000 CIT so it can pay claims
+  // 4. Deploy DailyReportRegistry
+  console.log("Deploying DailyReportRegistry...");
+  const DailyReportRegistry = await hardhat.ethers.getContractFactory("DailyReportRegistry");
+  const dailyReportRegistry = await DailyReportRegistry.deploy();
+  await dailyReportRegistry.waitForDeployment();
+  const dailyReportAddress = await dailyReportRegistry.getAddress();
+  console.log(`✅ DailyReportRegistry deployed to: ${dailyReportAddress}`);
+
+  // 5. Fund the ClaimsProcessor
   console.log("Funding ClaimsProcessor with 50,000 CIT...");
   await cyberToken.transfer(claimsAddress, hardhat.ethers.parseEther("50000"));
 
-  // 5. Write addresses to deployed_addresses.json
+  // 6. Save addresses
   const addresses = {
     CyberToken: tokenAddress,
     AuditRegistry: auditAddress,
     Governance: govAddress,
     PostureRegistry: postureAddress,
     PolicyEngine: policyAddress,
-    ClaimsProcessor: claimsAddress
+    ClaimsProcessor: claimsAddress,
+    DailyReportRegistry: dailyReportAddress
   };
 
   const outputPath = path.join(__dirname, "..", "backend", "deployed_addresses.json");
@@ -77,14 +91,8 @@ async function main() {
   envContent = envContent.replace(/POSTURE_REGISTRY_ADDRESS=.*/, `POSTURE_REGISTRY_ADDRESS=${postureAddress}`);
   envContent = envContent.replace(/POLICY_ENGINE_ADDRESS=.*/, `POLICY_ENGINE_ADDRESS=${policyAddress}`);
   envContent = envContent.replace(/CLAIMS_PROCESSOR_ADDRESS=.*/, `CLAIMS_PROCESSOR_ADDRESS=${claimsAddress}`);
-
-  if (envContent.includes('CYBER_TOKEN_ADDRESS')) {
-    envContent = envContent.replace(/CYBER_TOKEN_ADDRESS=.*/, `CYBER_TOKEN_ADDRESS=${tokenAddress}`);
-  } else {
-    envContent += `\nCYBER_TOKEN_ADDRESS=${tokenAddress}`;
-  }
+  envContent = envContent.replace(/CYBER_TOKEN_ADDRESS=.*/, `CYBER_TOKEN_ADDRESS=${tokenAddress}`);
   fs.writeFileSync(".env", envContent);
-  console.log("Successfully updated .env and deployed_addresses.json");
 }
 
 main().catch((error) => {

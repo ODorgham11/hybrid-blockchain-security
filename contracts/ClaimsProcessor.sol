@@ -5,7 +5,6 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 // ── Interfaces ─────────────────────────────────────────────────────────
-// Using interfaces decouples the contracts and prevents "Identifier not found" errors.
 
 interface IPostureRegistry {
     function getSecurityHygieneScore(address _company) external view returns (uint8);
@@ -13,6 +12,10 @@ interface IPostureRegistry {
 
 interface IPolicyEngine {
     function isPolicyActive(address _company) external view returns (bool);
+}
+
+interface IAuditRegistry {
+    function getActionCountByTimeRange(uint256 startTimestamp, uint256 endTimestamp) external view returns (uint256);
 }
 
 // ── Contract ───────────────────────────────────────────────────────────
@@ -36,13 +39,24 @@ contract ClaimsProcessor is ReentrancyGuard {
         uint256 processedAt;
     }
 
+    /// @notice The immutable registry tracking daily company security postures.
     IPostureRegistry public immutable postureRegistry;
+    
+    /// @notice The immutable engine defining mandatory insurance coverage rules.
     IPolicyEngine public immutable policyEngine;
+    
+    /// @notice The immutable registry containing logs of AI defensive actions.
+    IAuditRegistry public immutable auditRegistry;
+    
+    /// @notice The immutable ERC20 token used to disburse claim payouts.
     IERC20 public immutable cyberToken; // The ERC20 Asset
     
     mapping(uint256 => Claim) private claims;
+    
+    /// @notice A sequentially increasing counter tracking total submitted claims.
     uint256 public claimCount;
 
+    /// @notice The designated off-chain Oracle or AI Backend allowed to submit fraud scores.
     address public backendSystem; 
 
     event ClaimFiled(uint256 indexed claimId, address indexed company, uint256 amount);
@@ -59,18 +73,26 @@ contract ClaimsProcessor is ReentrancyGuard {
     /// @param _postureRegistryAddress Address of the posture registry contract.
     /// @param _policyEngineAddress Address of the policy engine contract.
     /// @param _cyberTokenAddress Address of the ERC20 token used for payouts.
-    constructor(address _postureRegistryAddress, address _policyEngineAddress, address _cyberTokenAddress) {
+    /// @param _auditRegistryAddress Address of the audit registry for AI action verification.
+    constructor(
+        address _postureRegistryAddress, 
+        address _policyEngineAddress, 
+        address _cyberTokenAddress,
+        address _auditRegistryAddress
+    ) {
         postureRegistry = IPostureRegistry(_postureRegistryAddress);
         policyEngine = IPolicyEngine(_policyEngineAddress);
         cyberToken = IERC20(_cyberTokenAddress);
+        auditRegistry = IAuditRegistry(_auditRegistryAddress);
         backendSystem = msg.sender; 
     }
 
     /// @notice Allows a company to file a new cyber insurance claim.
-    /// @param _breachTimestamp The epoch time the breach occurred.
-    /// @param _attackType Description of the vector (e.g., "Ransomware").
-    /// @param _claimedAmount The amount of CIT tokens requested.
-    /// @return claimId The unique identifier for the newly filed claim.
+    /// @dev The sender must have an active policy in the PolicyEngine.
+    /// @param _breachTimestamp The exact Unix timestamp when the security breach occurred.
+    /// @param _attackType A descriptive string classifying the nature of the attack.
+    /// @param _claimedAmount The total number of tokens requested by the victim.
+    /// @return claimId The unique ID assigned to the newly filed claim.
     function fileClaim(
         uint256 _breachTimestamp,
         string calldata _attackType,
@@ -95,9 +117,11 @@ contract ClaimsProcessor is ReentrancyGuard {
     }
 
     /// @notice Records the AI-generated fraud score for a pending claim.
-    /// @param _claimId The ID of the claim to update.
-    /// @param _fraudScore The risk score (0-100) determined by the AI Agent.
-    /// @param _reportHash The SHA-256 hash of the off-chain reasoning report.
+    /// @dev Overwrites any previously empty fraud data and transitions the claim readiness.
+    /// @param _claimId The unique ID of the claim being investigated.
+    /// @param _fraudScore A risk integer from 0 (Safe) to 100 (Highly Fraudulent).
+    /// @param _reportHash The SHA256 hash of the off-chain AI fraud reasoning document.
+    /// @custom:security Protected by onlyBackend modifier.
     function recordFraudScore(uint256 _claimId, uint8 _fraudScore, bytes32 _reportHash) external onlyBackend {
         require(_claimId < claimCount, "Claim does not exist");
         require(claims[_claimId].verdict == Verdict.PENDING, "Claim already processed");
@@ -110,7 +134,8 @@ contract ClaimsProcessor is ReentrancyGuard {
 
     /// @notice Processes the claim, determines the verdict, and executes token transfers.
     /// @dev Implements the Checks-Effects-Interactions (CEI) pattern to prevent reentrancy.
-    /// @param _claimId The ID of the claim to adjudicate.
+    /// @param _claimId The unique ID of the claim to process.
+    /// @custom:security Protected by nonReentrant and onlyBackend modifiers.
     function processClaim(uint256 _claimId) external onlyBackend nonReentrant {
         // 1. CHECKS
         require(_claimId < claimCount, "Claim does not exist");
@@ -120,6 +145,19 @@ contract ClaimsProcessor is ReentrancyGuard {
         
         uint8 shs = postureRegistry.getSecurityHygieneScore(claim.company);
         uint8 aiFraudRisk = claim.fraudScore;
+        
+        // ── HYBRID LOGIC: AI Defensive Boost ───────────────────────────
+        // Query AuditRegistry for AI actions in the 7 days before breach.
+        uint256 startTime = claim.breachTimestamp > 7 days ? claim.breachTimestamp - 7 days : 0;
+        uint256 aiActions = auditRegistry.getActionCountByTimeRange(startTime, claim.breachTimestamp);
+        
+        // If the AI agent was actively defending (>5 actions), boost compliance by 10%.
+        if (aiActions > 5) {
+            uint16 boostedSHS = uint16(shs) + 10;
+            shs = boostedSHS > 100 ? 100 : uint8(boostedSHS);
+        }
+        // ───────────────────────────────────────────────────────────────
+
         uint256 payoutAmount = 0;
 
         // 2. EFFECTS
@@ -149,9 +187,10 @@ contract ClaimsProcessor is ReentrancyGuard {
         }
     }
 
-    /// @notice Retrieves the full data of a claim.
-    /// @param _claimId The ID of the claim to fetch.
-    /// @return A Claim struct containing all recorded data.
+    /// @notice Retrieves the comprehensive details of a given claim.
+    /// @dev Reverts if the requested claim ID does not exist.
+    /// @param _claimId The specific ID of the claim to fetch.
+    /// @return The complete Claim struct data.
     function getClaim(uint256 _claimId) external view returns (Claim memory) {
         require(_claimId < claimCount, "Claim does not exist");
         return claims[_claimId];

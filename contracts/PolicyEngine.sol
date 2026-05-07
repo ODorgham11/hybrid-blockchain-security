@@ -13,9 +13,13 @@ contract PolicyEngine {
         uint8 weight;           
     }
 
+    /// @notice The immutable address of the overarching insurer executing policies.
     address public immutable insurer;
     
+    /// @notice Mapping from a company's address to their required set of PolicyRules.
     mapping(address => PolicyRule[]) private companyPolicies;
+
+    /// @notice Indicates whether a company currently has an active, valid policy.
     mapping(address => bool) public isPolicyActive;
 
     event PolicySet(address indexed company, uint256 ruleCount);
@@ -31,11 +35,13 @@ contract PolicyEngine {
     }
 
     /// @notice Defines the policy rules for a specific company.
+    /// @dev Overwrites any existing policy for the company.
     /// @param _company The address of the company being insured.
     /// @param _ruleNames Human-readable names for the security rules.
     /// @param _requiredFlags Boolean flags indicating if the rule is mandatory.
     /// @param _maxAgeSeconds The maximum time allowed between security snapshots.
     /// @param _weights The percentage weight each rule contributes to the total SHS.
+    /// @custom:security Protected by onlyInsurer modifier to prevent unauthorized tampering.
     function setPolicy(
         address _company,
         string[] calldata _ruleNames,
@@ -67,8 +73,9 @@ contract PolicyEngine {
     }
 
     /// @notice Retrieves the full policy for a company.
+    /// @dev Only returns the dynamic array of PolicyRule structs.
     /// @param _company The address of the company to query.
-    /// @return An array of PolicyRule structs.
+    /// @return An array of PolicyRule structs representing the company's full policy.
     function getPolicy(address _company) external view returns (PolicyRule[] memory) {
         return companyPolicies[_company];
     }

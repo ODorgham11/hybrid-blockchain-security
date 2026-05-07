@@ -12,12 +12,14 @@ contract PostureRegistry {
         uint8 complianceScore;    // 0-100 score based on that day's data
     }
 
-    // Mapping from company address to an array of their daily snapshots
+    /// @notice Mapping from company address to an array of their daily snapshots.
+    /// @dev Used to calculate historical SHS scores.
     mapping(address => PostureSnapshot[]) private snapshots;
 
     event SnapshotRecorded(address indexed company, bytes32 merkleRoot, uint8 score);
 
     /// @notice Records a new daily snapshot
+    /// @dev Appends a new PostureSnapshot to the company's historical array.
     /// @param _merkleRoot The root of the daily security reasoning/data logs.
     /// @param _score The compliance score calculated for the day.
     function recordSnapshot(bytes32 _merkleRoot, uint8 _score) external {

@@ -9,11 +9,19 @@ import "./AuditRegistry.sol";
 contract Governance {
 
     // ── State ──────────────────────────────────────────────────────────────
+    /// @notice The contract deployer and supreme administrator.
     address public immutable owner;
+    
+    /// @notice The linked AuditRegistry contract for verifying AI actions.
     AuditRegistry public immutable auditRegistry;
 
+    /// @notice Mapping of addresses that have human oversight sign-off rights.
     mapping(address => bool) public authorizedSigners;
+    
+    /// @notice Tracks which AuditRegistry entry IDs are waiting for human approval.
     mapping(uint256 => bool) public pendingApprovals;
+    
+    /// @notice Tracks which AuditRegistry entry IDs have been approved.
     mapping(uint256 => bool) public approvedActions;
 
     // ── Events ─────────────────────────────────────────────────────────────
@@ -62,6 +70,8 @@ contract Governance {
     // ── Governance Logic ───────────────────────────────────────────────────
 
     /// @notice Request human approval for a specific audit entry.
+    /// @dev Only applies to HIGH (2) and CRITICAL (3) risk actions.
+    /// @param _entryId The ID of the action in the AuditRegistry.
     function requestApproval(uint256 _entryId) external {
         AuditRegistry.AuditEntry memory entry = auditRegistry.getEntry(_entryId);
         require(uint8(entry.riskLevel) >= 2, "Risk level does not require approval");
@@ -73,6 +83,9 @@ contract Governance {
     }
 
     /// @notice Approve a pending AI action.
+    /// @dev Emits an ActionApproved event.
+    /// @param _entryId The ID of the action awaiting approval.
+    /// @custom:security Protected by onlySigner modifier.
     function approve(uint256 _entryId) external onlySigner {
         require(pendingApprovals[_entryId], "No pending approval for this entry");
         pendingApprovals[_entryId] = false;
@@ -81,6 +94,9 @@ contract Governance {
     }
 
     /// @notice Reject a pending AI action.
+    /// @dev Emits an ActionRejected event. The action remains unapproved.
+    /// @param _entryId The ID of the action awaiting approval.
+    /// @custom:security Protected by onlySigner modifier.
     function reject(uint256 _entryId) external onlySigner {
         require(pendingApprovals[_entryId], "No pending approval for this entry");
         pendingApprovals[_entryId] = false;
@@ -89,10 +105,16 @@ contract Governance {
 
     // ── View Functions ─────────────────────────────────────────────────────
 
+    /// @notice Checks if an action has been approved.
+    /// @param _entryId The ID of the action.
+    /// @return True if the action is approved, false otherwise.
     function isApproved(uint256 _entryId) external view returns (bool) {
         return approvedActions[_entryId];
     }
 
+    /// @notice Checks if an action is currently waiting for approval.
+    /// @param _entryId The ID of the action.
+    /// @return True if the action is pending, false otherwise.
     function isPending(uint256 _entryId) external view returns (bool) {
         return pendingApprovals[_entryId];
     }
