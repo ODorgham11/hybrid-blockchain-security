@@ -8,9 +8,9 @@ Aegis OS operates on a **Three-Pillar Accountability Model**:
 
 1. **The AI Layer (Non-Repudiable Reasoning)**: Python-based AI agents act as the operational core, analyzing fraud risk and verifying security posture. All AI reasoning is logged off-chain and its integrity is anchored on-chain via Merkle Roots.
 2. **The Cyber Layer (Bilateral Compliance)**: Standardizes security hygiene metrics. If a client follows instructions but is breached, the AI takes the blame. If the client ignores instructions, their Security Hygiene Score (SHS) drops and claims are denied.
-3. **The Blockchain Layer (Immutable Arbiter)**: Built on a local Hardhat network. The `ClaimsProcessor` smart contract automatically adjudicates claims and triggers payouts using our custom ERC20 token, **CyberToken (CIT)**.
+3. **The Blockchain Layer (Immutable Arbiter)**: Built on Hardhat. The `ClaimsProcessor` smart contract automatically adjudicates claims and triggers payouts using our custom ERC20 token, **CyberToken (CIT)**.
 
-## 🚀 Quick Start Guide
+## 🚀 Quick Start Guide (Local Execution)
 
 ### Prerequisites
 - [Node.js](https://nodejs.org/) (v18+ recommended)
@@ -50,13 +50,28 @@ npm install
 npm run dev
 ```
 
+## 🌍 Testnet Deployment (Sepolia)
+
+To deploy this project to the Ethereum Sepolia testnet for production testing:
+
+1. **Environment Variables**: Open your `.env` file in the root directory and add:
+   ```env
+   ALCHEMY_API_KEY="YOUR_ALCHEMY_API_KEY"
+   PRIVATE_KEY="YOUR_METAMASK_PRIVATE_KEY"
+   ```
+2. **Run Deployment Script**:
+   ```bash
+   npx hardhat run scripts/deploy.js --network sepolia
+   ```
+3. **Frontend Integration**: The newly generated Sepolia contract addresses will automatically be saved to `backend/deployed_addresses.json`. Update your `App.jsx` with these new addresses to test via the Sepolia network.
+
 ## 🦊 MetaMask Configuration
 1. Open MetaMask and add a custom network:
    - **Network Name**: Hardhat Localhost
    - **RPC URL**: `http://127.0.0.1:8545`
    - **Chain ID**: `1337`
    - **Currency Symbol**: `ETH`
-2. Import an account using one of the private keys provided by the `npx hardhat node` terminal (usually Account #0 or #1).
+2. Import an account using one of the private keys provided by the `npx hardhat node` terminal.
 3. Switch your MetaMask network to the newly created Hardhat Localhost.
 
 ## 📜 Core Scripts
