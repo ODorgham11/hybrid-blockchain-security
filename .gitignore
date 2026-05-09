@@ -19,3 +19,10 @@ venv/
 # Frontend build
 frontend/dist/
 frontend/node_modules/
+
+# AI Prompts
+FRONTEND_BUILD_PROMPT.md
+
+# Runtime Database
+backend/aegis.db
+backend/backend/audit_log/

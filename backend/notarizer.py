@@ -6,9 +6,9 @@ import hashlib
 import logging
 from datetime import datetime
 from pathlib import Path
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import hasher
 import blockchain
+import database
 
 # Module level lock for sequence integrity
 # Single worker only — see startup constraint
@@ -19,11 +19,11 @@ class Notarizer:
         self.queue = queue
         self.audit_log_dir = Path(audit_log_dir)
         self.audit_log_dir.mkdir(parents=True, exist_ok=True)
-        self.scheduler = AsyncIOScheduler()
-        
+        self._task: asyncio.Task | None = None
+
         self.sequence_file = self.audit_log_dir / "sequence.json"
         self.gap_alerts_file = self.audit_log_dir / "gap_alerts.json"
-        
+
         self.last_event_id = self._load_last_id()
         self.last_committed_batch_timestamp = 0
         self.gap_detected = False
@@ -54,10 +54,18 @@ class Notarizer:
             return self.last_event_id
 
     def start(self):
-        # Fix 3: AsyncIOScheduler with max_instances=1 and coalesce=True
-        self.scheduler.add_job(self.run_batch, 'interval', seconds=60, max_instances=1, coalesce=True)
-        self.scheduler.start()
-        print("[Notarizer] Background service started.")
+        """Launch the background notarization loop as an asyncio task."""
+        self._task = asyncio.create_task(self._loop())
+        print("[Notarizer] Background service started (asyncio loop, 60s interval).")
+
+    async def _loop(self):
+        """Run run_batch every 60 seconds indefinitely."""
+        while True:
+            await asyncio.sleep(60)
+            try:
+                await self.run_batch()
+            except Exception as e:
+                logging.getLogger("Notarizer").error(f"Batch error: {e}")
 
     async def run_batch(self):
         # Fix 4: Job is async def and awaited by AsyncIOScheduler
@@ -114,6 +122,16 @@ class Notarizer:
         file_path = self.audit_log_dir / f"batch_{timestamp}.json"
         with open(file_path, "w") as f:
             json.dump(batch_data, f, indent=4)
+
+        # Persist notarization action to DB
+        status = "SUCCESS" if batch_id >= 0 else "FAILED"
+        database.insert_system_action(
+            action_type="NOTARIZATION",
+            target=f"Batch of {len(events)} events",
+            description=f"Merkle root committed: {merkle_root[:18]}... (batch_id={batch_id})",
+            triggered_by="Notarizer",
+            status=status
+        )
 
     def _build_merkle_root(self, leaves: list[str]) -> str:
         if not leaves:

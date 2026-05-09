@@ -9,6 +9,7 @@ from langchain_core.prompts import PromptTemplate
 
 sys.path.append(str(Path(__file__).parent.parent))
 import hasher
+import database
 
 logger = logging.getLogger("AnomalyDetector")
 
@@ -20,7 +21,7 @@ class AnomalyReport(BaseModel):
 class AnomalyDetector:
     def __init__(self):
         try:
-            self.llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0.1).with_structured_output(AnomalyReport)
+            self.llm = ChatGoogleGenerativeAI(model="gemini-flash-latest", temperature=0.1).with_structured_output(AnomalyReport)
         except Exception as e:
             logger.critical(f"LLM init failed: {e}")
             self.llm = None
@@ -54,6 +55,30 @@ class AnomalyDetector:
                 }
                 await queue.put(event)
                 print(f"[Anomaly Detector] Event #{event_id} queued.")
+
+                # Persist to DB
+                action_lower = decision_obj.recommended_action.lower()
+                action_type = "PATCH_FLAG" if "patch" in action_lower else \
+                              "QUARANTINE" if "quarantin" in action_lower else \
+                              "ALERT_ESCALATION"
+                decision_id = database.insert_ai_decision(
+                    agent_name="AnomalyDetector",
+                    instruction=self.prompt.template,
+                    context=logs_json[:200],
+                    reasoning=decision_obj.reasoning,
+                    action_taken=decision_obj.recommended_action,
+                    risk_level=2,
+                    event_id=event_id,
+                    onchain_entry_id=event_id
+                )
+                database.insert_system_action(
+                    action_type=action_type,
+                    target="Daily Log Analysis",
+                    description=decision_obj.recommended_action,
+                    triggered_by="AnomalyDetector",
+                    status="SUCCESS",
+                    decision_id=decision_id
+                )
                 
             return {
                 "success": True,

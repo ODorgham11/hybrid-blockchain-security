@@ -14,8 +14,8 @@ const config = {
       chainId: 1337
     },
     sepolia: {
-      url: process.env.ALCHEMY_API_KEY ? `https://eth-sepolia.g.alchemy.com/v2/${process.env.ALCHEMY_API_KEY}` : "",
-      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : []
+      url: process.env.ALCHEMY_API_KEY && !process.env.ALCHEMY_API_KEY.includes("YOUR_") ? `https://eth-sepolia.g.alchemy.com/v2/${process.env.ALCHEMY_API_KEY}` : "",
+      accounts: process.env.PRIVATE_KEY && process.env.PRIVATE_KEY.startsWith("0x") && process.env.PRIVATE_KEY.length === 66 ? [process.env.PRIVATE_KEY] : []
     }
   }
 };

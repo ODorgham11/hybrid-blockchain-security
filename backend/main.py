@@ -4,9 +4,15 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from dotenv import load_dotenv
+
+# Explicitly load .env from parent directory
+env_path = Path(__file__).resolve().parent.parent / ".env"
+load_dotenv(dotenv_path=env_path)
 
 # Import our custom modules
 import blockchain
+import database
 from agents.security_agent import SecurityAgent
 from agents.anomaly_detector import AnomalyDetector
 from agents.fraud_analyzer import FraudAnalyzer
@@ -37,7 +43,8 @@ fraud_analyzer = FraudAnalyzer()
 
 @app.on_event("startup")
 async def startup_event():
-    """System startup: Initialize blockchain and start background notarizer."""
+    """System startup: Initialize blockchain, DB, and start background notarizer."""
+    database.init_db()
     blockchain.init_blockchain()
     notarizer.start()
 
@@ -100,3 +107,33 @@ if __name__ == "__main__":
     import uvicorn
     # Single worker only for sequence integrity
     uvicorn.run("main:app", host="127.0.0.1", port=8000, workers=1)
+
+# ── New Database Read Endpoints ─────────────────────────────────────────
+
+@app.get("/api/activity-feed")
+def get_activity_feed(limit: int = 100):
+    """All system actions merged with AI context, newest first."""
+    return database.get_activity_feed(limit=limit)
+
+@app.get("/api/ai-decisions")
+def get_ai_decisions(limit: int = 50):
+    """Recent AI decisions with full reasoning text."""
+    return database.get_ai_decisions(limit=limit)
+
+@app.get("/api/claim-analysis/{claim_id}")
+def get_claim_analysis(claim_id: int):
+    """Fraud analysis for a specific claim."""
+    result = database.get_claim_analysis(claim_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="No analysis found for this claim")
+    return result
+
+@app.get("/api/alerts")
+def get_recent_alerts(limit: int = 20):
+    """Recent raw security alerts."""
+    return database.get_recent_alerts(limit=limit)
+
+@app.get("/api/system-stats")
+def get_system_stats():
+    """Aggregate stats for the Admin Dashboard."""
+    return database.get_system_stats()

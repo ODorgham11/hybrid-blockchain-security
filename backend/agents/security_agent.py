@@ -9,6 +9,7 @@ from langchain_core.prompts import PromptTemplate
 
 sys.path.append(str(Path(__file__).parent.parent))
 import hasher
+import database
 
 logger = logging.getLogger("SecurityAgent")
 
@@ -21,7 +22,7 @@ class SecurityAgent:
     def __init__(self):
         # Fix 5: Graceful LLM initialization
         try:
-            self.llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0.2).with_structured_output(SecurityDecision)
+            self.llm = ChatGoogleGenerativeAI(model="gemini-flash-latest", temperature=0.2).with_structured_output(SecurityDecision)
         except Exception as e:
             logger.critical(f"LLM init failed: {e}")
             self.llm = None
@@ -54,6 +55,39 @@ class SecurityAgent:
                 "agent_name": "SecurityAgent"
             }
             await queue.put(event)
+
+            # Persist full reasoning to DB
+            action_lower = decision_obj.action.lower()
+            if "block" in action_lower and "firewall" in action_lower:
+                action_type = "FIREWALL_BLOCK"
+            elif "block" in action_lower or "blacklist" in action_lower:
+                action_type = "IP_BLOCK"
+            elif "isolat" in action_lower or "quarantin" in action_lower:
+                action_type = "QUARANTINE"
+            elif "patch" in action_lower:
+                action_type = "PATCH_FLAG"
+            else:
+                action_type = "ALERT_ESCALATION"
+
+            decision_id = database.insert_ai_decision(
+                agent_name="SecurityAgent",
+                instruction=self.prompt.template,
+                context=system_context,
+                reasoning=decision_obj.reasoning,
+                action_taken=decision_obj.action,
+                risk_level=decision_obj.risk_level,
+                event_id=event_id,
+                onchain_entry_id=event_id
+            )
+            database.insert_system_action(
+                action_type=action_type,
+                target=system_context[:80],
+                description=decision_obj.action,
+                triggered_by="SecurityAgent",
+                status="SUCCESS",
+                decision_id=decision_id
+            )
+
             return {
                 "success": True,
                 "event_id": event_id,

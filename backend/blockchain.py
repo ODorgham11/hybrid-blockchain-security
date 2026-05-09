@@ -15,6 +15,7 @@ governance = None
 posture_registry = None
 claims_processor = None
 policy_engine = None
+daily_report_registry = None
 
 logger = logging.getLogger("blockchain")
 
@@ -31,7 +32,7 @@ def get_contract_abi(contract_name: str) -> list:
     return data["abi"]
 
 def init_blockchain():
-    global BLOCKCHAIN_AVAILABLE, audit_registry, governance, posture_registry, claims_processor, policy_engine
+    global BLOCKCHAIN_AVAILABLE, audit_registry, governance, posture_registry, claims_processor, policy_engine, daily_report_registry
     
     print("[Blockchain] Connecting to Hardhat node...")
     if not w3.is_connected():
@@ -59,6 +60,7 @@ def init_blockchain():
         posture_registry = load_contract("PostureRegistry", "PostureRegistry")
         claims_processor = load_contract("ClaimsProcessor", "ClaimsProcessor")
         policy_engine = load_contract("PolicyEngine", "PolicyEngine")
+        daily_report_registry = load_contract("DailyReportRegistry", "DailyReportRegistry")
         
         BLOCKCHAIN_AVAILABLE = True
         print("[Blockchain] System initialized successfully.")
@@ -88,17 +90,19 @@ def log_ai_action(instruction_hash: str, context_hash: str, reasoning_hash: str,
         return -1
 
 def record_batch_root(merkle_root: str) -> int:
-    """Submits a Merkle root for a batch of events to AuditRegistry."""
-    if not BLOCKCHAIN_AVAILABLE or not audit_registry: 
+    """Submits a Merkle root for a batch of events to DailyReportRegistry."""
+    if not BLOCKCHAIN_AVAILABLE or not daily_report_registry: 
         return -1
     
     try:
-        tx_hash = audit_registry.functions.recordBatchRoot(
-            Web3.to_bytes(hexstr=merkle_root)
+        tx_hash = daily_report_registry.functions.submitDailyReport(
+            Web3.to_bytes(hexstr=merkle_root),
+            10, # default totalActions
+            1 # default avgRiskLevel
         ).transact()
         receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
-        logs = audit_registry.events.BatchLogged().process_receipt(receipt)
-        return logs[0]['args']['batchId'] if logs else -1
+        logs = daily_report_registry.events.DailyReportSubmitted().process_receipt(receipt)
+        return logs[0]['args']['day'] if logs else -1
     except Exception as e:
         logger.error(f"record_batch_root failed: {e}")
         return -1

@@ -11,6 +11,7 @@ from langchain_core.prompts import PromptTemplate
 sys.path.append(str(Path(__file__).parent.parent))
 import hasher
 import blockchain
+import database
 
 logger = logging.getLogger("FraudAnalyzer")
 
@@ -21,7 +22,7 @@ class FraudAnalysis(BaseModel):
 class FraudAnalyzer:
     def __init__(self):
         try:
-            self.llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0).with_structured_output(FraudAnalysis)
+            self.llm = ChatGoogleGenerativeAI(model="gemini-flash-latest", temperature=0).with_structured_output(FraudAnalysis)
         except Exception as e:
             logger.critical(f"LLM init failed: {e}")
             self.llm = None
@@ -57,6 +58,40 @@ class FraudAnalyzer:
                 "agent_name": "FraudAnalyzer"
             }
             await queue.put(event)
+
+            # Persist to DB
+            if decision_obj.fraud_score < 30:
+                recommendation = "APPROVE"
+            elif decision_obj.fraud_score < 75:
+                recommendation = "PARTIAL"
+            else:
+                recommendation = "DENY"
+
+            database.insert_claim_analysis(
+                claim_id=claim_id,
+                fraud_score=decision_obj.fraud_score,
+                reasoning=decision_obj.report,
+                recommendation=recommendation
+            )
+            decision_id = database.insert_ai_decision(
+                agent_name="FraudAnalyzer",
+                instruction=self.prompt.template,
+                context=f"{claim_data} | Posture: {historical_posture}",
+                reasoning=decision_obj.report,
+                action_taken=f"Fraud Score: {decision_obj.fraud_score}/100 — {recommendation}",
+                risk_level=1 if decision_obj.fraud_score < 50 else 3,
+                event_id=event_id,
+                claim_id=claim_id,
+                onchain_entry_id=event_id
+            )
+            database.insert_system_action(
+                action_type="POLICY_CHECK",
+                target=f"Claim #{claim_id}",
+                description=f"Fraud score: {decision_obj.fraud_score}/100 — Recommendation: {recommendation}",
+                triggered_by="FraudAnalyzer",
+                status="SUCCESS",
+                decision_id=decision_id
+            )
 
             # Fix 9: Robust transaction signing for ClaimsProcessor
             if blockchain.BLOCKCHAIN_AVAILABLE and blockchain.claims_processor:
