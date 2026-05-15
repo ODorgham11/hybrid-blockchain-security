@@ -26,6 +26,35 @@ It links **AI decisioning**, **cryptographic notarization**, and **smart-contrac
 | Blockchain | Solidity contracts + Hardhat | Immutable AI audit logs, posture/policy state, claim adjudication, token payouts |
 | Persistence | SQLite (`backend/aegis.db`) + JSON logs | Decision history, activity feed, alerts, claim analyses, batch files |
 
+### System Architecture Diagram
+
+```text
+┌─────────────────────────────────────────────────────────────────────┐
+│                         FRONTEND (React/Vite)                      │
+│ Admin + Client Dashboards, Wallet Connect, API/Chain Views         │
+└──────────────────────────────┬──────────────────────────────────────┘
+                               │ HTTP (Axios)
+                               ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                       BACKEND (FastAPI / AI)                       │
+│ Endpoints + SecurityAgent + AnomalyDetector + FraudAnalyzer        │
+└───────────────┬───────────────────────────────┬─────────────────────┘
+                │                               │
+                │ SQLite writes                 │ Web3 interactions
+                ▼                               ▼
+┌───────────────────────────────┐   ┌──────────────────────────────────┐
+│        SQLite (aegis.db)      │   │   Smart Contracts (Hardhat)      │
+│ decisions/actions/alerts/etc. │   │ Audit, Policy, Posture, Claims,  │
+└───────────────────────────────┘   │ Governance, Daily Reports, Token │
+                                    └───────────────┬──────────────────┘
+                                                    │
+                                                    ▼
+                                    ┌──────────────────────────────────┐
+                                    │ Notarizer + Merkle Batch Logs    │
+                                    │ sequence.json, gap_alerts, batch │
+                                    └──────────────────────────────────┘
+```
+
 ### Runtime Data Flow
 
 1. Frontend sends security/claim inputs to FastAPI.
@@ -178,10 +207,84 @@ Configured/used by runtime and scripts:
 # root (hardhat/contracts)
 npm install
 
+# backend (Python dependencies)
+cd backend
+python -m venv .venv
+# Windows: .venv\Scripts\activate
+# macOS/Linux: source .venv/bin/activate
+pip install -r requirements.txt
+cd ..
+
 # frontend
 cd frontend
 npm install
 cd ..
+```
+
+## Required Libraries to Install
+
+This project has **three dependency groups**: root smart-contract toolchain, backend Python stack, and frontend UI stack.
+
+### A) Root (Hardhat / contracts)
+
+Install from root `package.json`:
+
+- `hardhat`
+- `@nomicfoundation/hardhat-toolbox`
+- `@openzeppelin/contracts`
+- `dotenv`
+- `solidity-docgen`
+
+Install command:
+
+```bash
+cd /home/runner/work/hybrid-blockchain-security/hybrid-blockchain-security
+npm install
+```
+
+### B) Backend (Python / FastAPI / AI)
+
+Install from `backend/requirements.txt`:
+
+- `fastapi==0.109.0`
+- `uvicorn==0.27.0`
+- `langchain==0.1.0`
+- `langchain-google-genai==0.0.13`
+- `langchain-core==0.1.0`
+- `web3==6.11.3`
+- `apscheduler==3.10.4`
+- `python-dotenv==1.0.0`
+- `pydantic==2.5.0`
+- `google-genai==0.3.0`
+- `cryptography==41.0.7`
+
+Install command:
+
+```bash
+cd /home/runner/work/hybrid-blockchain-security/hybrid-blockchain-security/backend
+python -m venv .venv
+# Windows: .venv\Scripts\activate
+# macOS/Linux: source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+### C) Frontend (React / Vite)
+
+Install from `frontend/package.json`:
+
+- `react`, `react-dom`
+- `vite`, `@vitejs/plugin-react`
+- `ethers`
+- `axios`
+- `recharts`
+- `lucide-react`
+- `eslint` + related plugins/config packages
+
+Install command:
+
+```bash
+cd /home/runner/work/hybrid-blockchain-security/hybrid-blockchain-security/frontend
+npm install
 ```
 
 ### 2) Run local blockchain
