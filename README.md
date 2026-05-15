@@ -238,7 +238,7 @@ Install from root `package.json`:
 Install command:
 
 ```bash
-cd /home/runner/work/hybrid-blockchain-security/hybrid-blockchain-security
+cd <repo-root>
 npm install
 ```
 
@@ -261,7 +261,7 @@ Install from `backend/requirements.txt`:
 Install command:
 
 ```bash
-cd /home/runner/work/hybrid-blockchain-security/hybrid-blockchain-security/backend
+cd <repo-root>/backend
 python -m venv .venv
 # Windows: .venv\Scripts\activate
 # macOS/Linux: source .venv/bin/activate
@@ -283,7 +283,7 @@ Install from `frontend/package.json`:
 Install command:
 
 ```bash
-cd /home/runner/work/hybrid-blockchain-security/hybrid-blockchain-security/frontend
+cd <repo-root>/frontend
 npm install
 ```
 
