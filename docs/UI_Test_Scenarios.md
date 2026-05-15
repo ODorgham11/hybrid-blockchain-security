@@ -312,6 +312,42 @@ GET http://localhost:8000/api/system-stats    → total_actions count
 
 ---
 
+## PHASE 14 — Threat Simulator (Admin View #7) ⭐ NEW
+
+### Test 14.1 — Launch Predefined Attack
+1. Admin → Threat Simulator → Select "Ransomware Payload" → Click "Launch"
+2. **Expected**: Button shows "⏳ Analyzing..." → After ~40s, red box appears with Risk Level 3 and "ISOLATE HOST" action.
+
+### Test 14.2 — Background Persistence
+1. Click "Launch" on an attack → Immediately navigate to "Dashboard"
+2. Wait 1 minute → Navigate back to "Threat Simulator"
+**Expected**: The AI response is visible exactly as it finished (state was not lost).
+
+### Test 14.3 — Smart Contract Vulnerability
+1. Select "Smart Contract" tab → "Reentrancy Attack" → Launch
+**Expected**: Risk Level: 3 → Action: PAUSE CONTRACT → Notarization ID generated.
+
+---
+
+## PHASE 15 — Database Viewer (Admin View #8) ⭐ NEW
+
+### Test 15.1 — Full DB Visibility
+1. Admin → DB Viewer
+**Expected**: Table displays every action recorded in `aegis.db`.
+
+---
+
+## PHASE 16 — Live Chain Stream (Admin View #9) ⭐ NEW
+
+### Test 16.1 — WebSocket Connection
+**Expected**: Top-right badge shows green "WSS CONNECTED".
+
+### Test 16.2 — Real-time Terminal Stream
+1. Open Live Network in one window → Trigger attack in Simulator
+**Expected**: Matrix-style text appears instantly reflecting the on-chain event.
+
+---
+
 ## QUICK COMMAND REFERENCE
 
 ```bash
@@ -319,28 +355,26 @@ GET http://localhost:8000/api/system-stats    → total_actions count
 npx hardhat node                                                    # Terminal 1
 npx hardhat run scripts/deploy.js --network localhost               # Terminal 2
 npx hardhat run scripts/setup-policy.js --network localhost         # Terminal 2
-npx hardhat run scripts/seed-audit-data.js --network localhost      # Terminal 2 (seeds Phase 5/6/11)
-cd backend && uvicorn main:app --reload --workers 1                 # Terminal 3 (FastAPI)
+npx hardhat run scripts/seed-audit-data.js --network localhost      # Terminal 2
+cd backend && uvicorn main:app --reload --workers 1                 # Terminal 3
 cd frontend && npm run dev                                          # Terminal 4
 
-# Test backend directly
-curl -X POST http://localhost:8000/api/analyze-alert \
-  -H "Content-Type: application/json" \
-  -d '{"alert":"SSH brute force from 10.0.0.5","context":"3 attempts in 60s"}'
-
-curl http://localhost:8000/api/activity-feed
-curl http://localhost:8000/api/system-stats
+# Verify Blockchain Connection
+python -c "import sys; sys.path.append('backend'); import blockchain; blockchain.init_blockchain(); print('Entries:', blockchain.audit_registry.functions.getEntryCount().call())"
 ```
 
 ---
 
-## DEMO ORDER (For Doctor — ~7 minutes)
+## DEMO ORDER (For Doctor — ~10 minutes)
 
-1. **Login as Admin** → show 6-page dashboard
-2. **Policy Manager** → deploy policy + lookup
-3. **Switch to Client** → File a Claim (show tx feedback loop)
-4. **Switch to Admin** → Claims Admin → process claim → click "📋 View Analysis" (show DB drawer)
-5. **Client Dashboard** → CIT balance updated live → My Claims (APPROVED badge)
-6. **Admin → Chain Explorer** → Panel A (on-chain hashes vs real DB reasoning) → Panel C (Merkle root)
-7. **Admin → Audit Trail** → request governance approval for HIGH entry → approve
-8. **Admin → Activity Feed** → show all backend actions in timeline (FIREWALL, POLICY_CHECK, NOTARIZATION)
+1. **Login as Admin** → Show role-based auth and 9-page sidebar.
+2. **Threat Simulator** → Launch "Ransomware" (explain AI analysis delay).
+3. **Navigate Freely** → Go to Dashboard/Policies while AI works (show persistence).
+4. **Live Chain Stream** → Watch the Matrix stream catch the event in real-time.
+5. **Chain Explorer** → Show the immutable anchor (Hash match).
+6. **DB Viewer** → Show full off-chain database transparency.
+7. **Audit Trail** → Governance flow (Request/Approve).
+8. **Switch to Client** → File a claim (show user experience).
+9. **Back to Admin** → Claims Admin → Score & Process (automated fraud scoring).
+10. **Activity Feed** → Summary of everything that happened in the session.
+

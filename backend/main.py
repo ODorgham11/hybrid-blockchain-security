@@ -1,10 +1,14 @@
 import sys
 import asyncio
+from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
+
+# Ensure backend dir is always on path regardless of CWD
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 # Explicitly load .env from parent directory
 env_path = Path(__file__).resolve().parent.parent / ".env"
@@ -18,8 +22,6 @@ from agents.anomaly_detector import AnomalyDetector
 from agents.fraud_analyzer import FraudAnalyzer
 from notarizer import Notarizer
 
-app = FastAPI(title="Hybrid Security & Insurance Backend (Phase 2 Fixed)")
-
 # Constraint: uvicorn must run with --workers 1
 # This ensures asyncio.Lock works correctly for the sequential ID system.
 
@@ -27,26 +29,36 @@ app = FastAPI(title="Hybrid Security & Insurance Backend (Phase 2 Fixed)")
 event_queue = asyncio.Queue()
 notarizer = Notarizer(event_queue)
 
-# CORS Fix: Restricted to frontend URL for credentials support
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 # Initialize AI Agents
 security_agent = SecurityAgent()
-anomaly_detector = AnomalyDetector()
+anomalydetector = AnomalyDetector()
 fraud_analyzer = FraudAnalyzer()
 
-@app.on_event("startup")
-async def startup_event():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     """System startup: Initialize blockchain, DB, and start background notarizer."""
     database.init_db()
     blockchain.init_blockchain()
     notarizer.start()
+    yield
+    # Shutdown: cancel the notarizer background task
+    if notarizer._task:
+        notarizer._task.cancel()
+
+app = FastAPI(title="Aegis OS — Hybrid Security & Insurance Backend", lifespan=lifespan)
+
+# CORS Fix: Restricted to frontend URL for credentials support
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173", 
+        "http://localhost:5174",
+        "http://localhost:5175"
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # --- Request Models ---
 class AlertRequest(BaseModel):
@@ -72,7 +84,7 @@ async def analyze_security_alert(req: AlertRequest):
 
 @app.post("/api/analyze-daily-logs")
 async def analyze_logs(req: LogsRequest):
-    result = await anomaly_detector.analyze_daily_logs(req.daily_logs, event_queue, notarizer)
+    result = await anomalydetector.analyze_daily_logs(req.daily_logs, event_queue, notarizer)
     if not result.get("success", True) or "error" in result:
         raise HTTPException(status_code=500, detail=result.get("error", "Unknown error"))
     return result
@@ -94,6 +106,17 @@ async def verify_event(event_hash: str):
     if not proof_data:
         raise HTTPException(status_code=404, detail="Event hash not found.")
     return proof_data
+
+@app.get("/api/db-dump")
+async def get_db_dump():
+    decisions = database.get_ai_decisions(limit=500)
+    import hasher
+    for d in decisions:
+        d["instruction_hash"] = hasher.sha256(d["instruction"])
+        d["context_hash"] = hasher.sha256(d.get("context") or "")
+        d["reasoning_hash"] = hasher.sha256(d["reasoning"])
+        d["action_hash"] = hasher.sha256(d["action_taken"])
+    return {"ai_decisions": decisions}
 
 @app.get("/")
 def health_check():

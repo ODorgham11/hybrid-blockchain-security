@@ -5,7 +5,7 @@ from pathlib import Path
 from web3 import Web3
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(dotenv_path=Path(__file__).parent.parent / ".env")
 
 # Global state
 w3 = Web3(Web3.HTTPProvider(os.getenv("HARDHAT_RPC_URL", "http://127.0.0.1:8545")))

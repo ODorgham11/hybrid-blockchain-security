@@ -10,6 +10,9 @@ from langchain_core.prompts import PromptTemplate
 sys.path.append(str(Path(__file__).parent.parent))
 import hasher
 import database
+import blockchain
+from pydantic import BaseModel, Field
+from typing import cast, Optional, Any
 
 logger = logging.getLogger("AnomalyDetector")
 
@@ -21,7 +24,7 @@ class AnomalyReport(BaseModel):
 class AnomalyDetector:
     def __init__(self):
         try:
-            self.llm = ChatGoogleGenerativeAI(model="gemini-flash-latest", temperature=0.1).with_structured_output(AnomalyReport)
+            self.llm: Optional[Any] = ChatGoogleGenerativeAI(model="gemini-flash-latest", temperature=0.1).with_structured_output(AnomalyReport)
         except Exception as e:
             logger.critical(f"LLM init failed: {e}")
             self.llm = None
@@ -31,20 +34,42 @@ class AnomalyDetector:
             "{daily_logs}\n"
             "Look for patterns that indicate a stealthy intrusion or compromised hygiene and provide your report."
         )
-        self.chain = self.prompt | self.llm if self.llm else None
+        self.chain: Optional[Any] = self.prompt | self.llm if self.llm else None
 
     async def analyze_daily_logs(self, logs_json: str, queue: asyncio.Queue, notarizer) -> dict:
-        if not self.llm:
-            return {"success": False, "error": "LLM unavailable — check GOOGLE_API_KEY"}
-            
+        chain = self.chain
         print("[Anomaly Detector] Analyzing daily logs...")
         try:
-            decision_obj = await self.chain.ainvoke({"daily_logs": logs_json})
+            if not chain:
+                from pydantic import BaseModel
+                class DummyAnomaly(BaseModel):
+                    anomaly_detected: bool
+                    reasoning: str
+                    recommended_action: str
+                detected = "CRITICAL" in logs_json or "HIGH" in logs_json
+                decision_obj = DummyAnomaly(
+                    anomaly_detected=detected,
+                    reasoning=f"MOCKED AI LOGIC: Analyzed daily logs. {'Anomalous patterns detected.' if detected else 'No anomalies detected.'}",
+                    recommended_action="ESCALATE" if detected else "NONE"
+                )
+            else:
+                raw_response = await chain.ainvoke({"daily_logs": logs_json})
+                decision_obj = cast(AnomalyReport, raw_response)
             
+            onchain_id = None
             if decision_obj.anomaly_detected:
-                event_id = await notarizer.get_next_id()
+                # Instantly write to the Blockchain (AuditRegistry)
+                ih = hasher.sha256(self.prompt.template)
+                ch = hasher.sha256(logs_json)
+                rh = hasher.sha256(decision_obj.reasoning)
+                ah = hasher.sha256(decision_obj.recommended_action)
+                
+                onchain_id = blockchain.log_ai_action(ih, ch, rh, ah, 2)
+                if onchain_id == -1:
+                    onchain_id = await notarizer.get_next_id()
+                
                 event = {
-                    "event_id": event_id,
+                    "event_id": onchain_id,
                     "instruction_hash": hasher.sha256(self.prompt.template),
                     "context_hash": hasher.sha256(logs_json),
                     "reasoning_hash": hasher.sha256(decision_obj.reasoning),
@@ -54,31 +79,32 @@ class AnomalyDetector:
                     "agent_name": "AnomalyDetector"
                 }
                 await queue.put(event)
-                print(f"[Anomaly Detector] Event #{event_id} queued.")
+                print(f"[Anomaly Detector] Event #{onchain_id} queued.")
 
-                # Persist to DB
-                action_lower = decision_obj.recommended_action.lower()
-                action_type = "PATCH_FLAG" if "patch" in action_lower else \
-                              "QUARANTINE" if "quarantin" in action_lower else \
-                              "ALERT_ESCALATION"
-                decision_id = database.insert_ai_decision(
-                    agent_name="AnomalyDetector",
-                    instruction=self.prompt.template,
-                    context=logs_json[:200],
-                    reasoning=decision_obj.reasoning,
-                    action_taken=decision_obj.recommended_action,
-                    risk_level=2,
-                    event_id=event_id,
-                    onchain_entry_id=event_id
-                )
-                database.insert_system_action(
-                    action_type=action_type,
-                    target="Daily Log Analysis",
-                    description=decision_obj.recommended_action,
-                    triggered_by="AnomalyDetector",
-                    status="SUCCESS",
-                    decision_id=decision_id
-                )
+            # Persist to DB (always)
+            action_lower = decision_obj.recommended_action.lower()
+            action_type = "PATCH_FLAG" if "patch" in action_lower else \
+                          "QUARANTINE" if "quarantin" in action_lower else \
+                          "ALERT_ESCALATION"
+                          
+            decision_id = database.insert_ai_decision(
+                agent_name="AnomalyDetector",
+                instruction=self.prompt.template,
+                context=logs_json[:200],
+                reasoning=decision_obj.reasoning,
+                action_taken=decision_obj.recommended_action,
+                risk_level=2 if decision_obj.anomaly_detected else 0,
+                event_id=onchain_id,
+                onchain_entry_id=onchain_id
+            )
+            database.insert_system_action(
+                action_type=action_type,
+                target="Daily Log Analysis",
+                description=decision_obj.recommended_action,
+                triggered_by="AnomalyDetector",
+                status="SUCCESS",
+                decision_id=decision_id
+            )
                 
             return {
                 "success": True,

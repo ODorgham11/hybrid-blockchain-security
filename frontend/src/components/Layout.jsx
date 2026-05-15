@@ -1,5 +1,5 @@
 import React from 'react';
-import { LayoutDashboard, Shield, FileText, ScrollText, Link, FilePlus, FileSearch, Activity } from 'lucide-react';
+import { LayoutDashboard, Shield, FileText, ScrollText, Link, FilePlus, FileSearch, Activity, Database, Network, Skull } from 'lucide-react';
 import { truncAddr } from '../config';
 
 const ADMIN_NAV = [
@@ -9,6 +9,9 @@ const ADMIN_NAV = [
   { key: 'audit', label: 'Audit Trail', icon: ScrollText },
   { key: 'explorer', label: 'Chain Explorer', icon: Link },
   { key: 'activity', label: 'Activity Feed', icon: Activity },
+  { key: 'live-network', label: 'Live Network', icon: Network },
+  { key: 'db-viewer', label: 'DB Viewer', icon: Database },
+  { key: 'threat-simulator', label: 'Threat Simulator', icon: Skull },
 ];
 
 const CLIENT_NAV = [

@@ -1,0 +1,11 @@
+{
+  "python.defaultInterpreterPath": "C:\\Dev\\blockchain-project\\Hybrid_Blockchain_Project\\.venv\\Scripts\\python.exe",
+  "python.pythonPath": "C:\\Dev\\blockchain-project\\Hybrid_Blockchain_Project\\.venv\\Scripts\\python.exe",
+  "python.analysis.extraPaths": [
+    "C:\\Dev\\blockchain-project\\Hybrid_Blockchain_Project\\backend",
+    "C:\\Dev\\blockchain-project\\Hybrid_Blockchain_Project\\backend\\agents"
+  ],
+  "python.analysis.typeCheckingMode": "off",
+  "python.analysis.reportMissingImports": "none",
+  "python.languageServer": "Pylance"
+}

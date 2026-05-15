@@ -1,0 +1,13 @@
+{
+  "venvPath": "C:\\Dev\\blockchain-project\\Hybrid_Blockchain_Project",
+  "venv": ".venv",
+  "pythonVersion": "3.12",
+  "pythonPlatform": "Windows",
+  "typeCheckingMode": "off",
+  "reportMissingModuleSource": "none",
+  "reportMissingImports": "none",
+  "extraPaths": [
+    "C:\\Dev\\blockchain-project\\Hybrid_Blockchain_Project\\backend",
+    "C:\\Dev\\blockchain-project\\Hybrid_Blockchain_Project\\backend\\agents"
+  ]
+}

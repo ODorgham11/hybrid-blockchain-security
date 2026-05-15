@@ -12,6 +12,9 @@ import ClaimsAdmin from './pages/admin/ClaimsAdmin';
 import AuditTrail from './pages/admin/AuditTrail';
 import ChainExplorer from './pages/admin/ChainExplorer';
 import AdminActivityFeed from './pages/admin/ActivityFeed';
+import DatabaseViewer from './pages/admin/DatabaseViewer';
+import ThreatSimulator from './pages/admin/ThreatSimulator';
+import LiveChainVisualizer from './pages/admin/LiveChainVisualizer';
 
 // Client Pages
 import ClientDashboard from './pages/client/ClientDashboard';
@@ -47,15 +50,25 @@ export default function App() {
   // Page router
   const renderPage = () => {
     if (role === "Admin") {
-      switch (currentPage) {
-        case 'dashboard': return <AdminDashboard provider={provider} />;
-        case 'policies': return <PolicyManager provider={provider} />;
-        case 'claims': return <ClaimsAdmin provider={provider} />;
-        case 'audit': return <AuditTrail provider={provider} />;
-        case 'explorer': return <ChainExplorer provider={provider} />;
-        case 'activity': return <AdminActivityFeed />;
-        default: return <AdminDashboard provider={provider} />;
-      }
+      return (
+        <>
+          {currentPage === 'dashboard' && <AdminDashboard provider={provider} />}
+          {currentPage === 'policies' && <PolicyManager provider={provider} />}
+          {currentPage === 'claims' && <ClaimsAdmin provider={provider} />}
+          {currentPage === 'audit' && <AuditTrail provider={provider} />}
+          {currentPage === 'explorer' && <ChainExplorer provider={provider} />}
+          {currentPage === 'activity' && <AdminActivityFeed />}
+          {currentPage === 'db-viewer' && <DatabaseViewer />}
+          
+          {/* Persistent Components: These stay mounted in the background so state/connections aren't lost */}
+          <div style={{ display: currentPage === 'threat-simulator' ? 'block' : 'none' }}>
+            <ThreatSimulator />
+          </div>
+          <div style={{ display: currentPage === 'live-network' ? 'block' : 'none', height: '100%' }}>
+            <LiveChainVisualizer provider={provider} />
+          </div>
+        </>
+      );
     } else {
       switch (currentPage) {
         case 'dashboard': return <ClientDashboard provider={provider} account={account} />;
