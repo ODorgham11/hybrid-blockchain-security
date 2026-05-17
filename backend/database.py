@@ -7,6 +7,7 @@ import sqlite3
 import time
 import os
 from pathlib import Path
+from typing import Optional
 
 DB_PATH = Path(__file__).parent / "aegis.db"
 
@@ -89,8 +90,8 @@ def init_db():
 
 def insert_ai_decision(agent_name: str, instruction: str, context: str,
                        reasoning: str, action_taken: str, risk_level,
-                       event_id: int = None, claim_id: int = None,
-                       onchain_entry_id: int = None) -> int:
+                       event_id: Optional[int] = None, claim_id: Optional[int] = None,
+                       onchain_entry_id: Optional[int] = None) -> int:
     """Insert a full AI decision record. Returns the new row id."""
     if isinstance(risk_level, int):
         risk_level = RISK_LABELS.get(risk_level, str(risk_level))

@@ -39,6 +39,7 @@ class FraudAnalyzer:
 
     async def analyze_claim(self, claim_id: int, claim_data: str, historical_posture: str, queue: asyncio.Queue, notarizer) -> dict:
         chain = self.chain
+        blockchain_id = None
         print(f"[Fraud Analyzer] Analyzing Claim #{claim_id}...")
         try:
             if not chain:
@@ -58,11 +59,10 @@ class FraudAnalyzer:
                 })
                 decision_obj = cast(FraudAnalysis, raw_response)
             
-            onchain_id = None
             if decision_obj.fraud_score >= 50:
-                onchain_id = await notarizer.get_next_id()
+                blockchain_id = await notarizer.get_next_id()
                 event = {
-                    "event_id": onchain_id,
+                    "event_id": blockchain_id,
                     "instruction_hash": hasher.sha256(self.prompt.template),
                     "context_hash": hasher.sha256(claim_data + historical_posture),
                     "reasoning_hash": hasher.sha256(decision_obj.report),
@@ -94,9 +94,9 @@ class FraudAnalyzer:
                 reasoning=decision_obj.report,
                 action_taken=f"Fraud Score: {decision_obj.fraud_score}/100 — {recommendation}",
                 risk_level=1 if decision_obj.fraud_score < 50 else 3,
-                event_id=onchain_id,
+                event_id=blockchain_id,
                 claim_id=claim_id,
-                onchain_entry_id=onchain_id
+                onchain_entry_id=blockchain_id
             )
             database.insert_system_action(
                 action_type="POLICY_CHECK",
@@ -134,7 +134,7 @@ class FraudAnalyzer:
                 "success": True,
                 "fraud_score": decision_obj.fraud_score,
                 "report": decision_obj.report,
-                "event_id": onchain_id,
+                "event_id": blockchain_id,
                 "notarization": "queued"
             }
         except Exception as e:

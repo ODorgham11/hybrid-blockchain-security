@@ -38,7 +38,8 @@ class AnomalyDetector:
 
     async def analyze_daily_logs(self, logs_json: str, queue: asyncio.Queue, notarizer) -> dict:
         chain = self.chain
-        print("[Anomaly Detector] Analyzing daily logs...")
+        blockchain_id = None
+        print(f"[Anomaly Detector] Analyzing daily logs...")
         try:
             if not chain:
                 from pydantic import BaseModel
@@ -56,20 +57,19 @@ class AnomalyDetector:
                 raw_response = await chain.ainvoke({"daily_logs": logs_json})
                 decision_obj = cast(AnomalyReport, raw_response)
             
-            onchain_id = None
             if decision_obj.anomaly_detected:
-                # Instantly write to the Blockchain (AuditRegistry)
+                # Instantly write high-risk anomaly to Blockchain (AuditRegistry)
                 ih = hasher.sha256(self.prompt.template)
-                ch = hasher.sha256(logs_json)
+                ch = hasher.sha256(logs_json[:200])
                 rh = hasher.sha256(decision_obj.reasoning)
                 ah = hasher.sha256(decision_obj.recommended_action)
                 
-                onchain_id = blockchain.log_ai_action(ih, ch, rh, ah, 2)
-                if onchain_id == -1:
-                    onchain_id = await notarizer.get_next_id()
+                blockchain_id = blockchain.log_ai_action(ih, ch, rh, ah, 2)
+                if blockchain_id == -1:
+                    blockchain_id = await notarizer.get_next_id()
                 
                 event = {
-                    "event_id": onchain_id,
+                    "event_id": blockchain_id,
                     "instruction_hash": hasher.sha256(self.prompt.template),
                     "context_hash": hasher.sha256(logs_json),
                     "reasoning_hash": hasher.sha256(decision_obj.reasoning),
@@ -79,7 +79,7 @@ class AnomalyDetector:
                     "agent_name": "AnomalyDetector"
                 }
                 await queue.put(event)
-                print(f"[Anomaly Detector] Event #{onchain_id} queued.")
+                print(f"[Anomaly Detector] Event #{blockchain_id} queued.")
 
             # Persist to DB (always)
             action_lower = decision_obj.recommended_action.lower()
@@ -94,8 +94,8 @@ class AnomalyDetector:
                 reasoning=decision_obj.reasoning,
                 action_taken=decision_obj.recommended_action,
                 risk_level=2 if decision_obj.anomaly_detected else 0,
-                event_id=onchain_id,
-                onchain_entry_id=onchain_id
+                event_id=blockchain_id,
+                onchain_entry_id=blockchain_id
             )
             database.insert_system_action(
                 action_type=action_type,

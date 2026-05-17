@@ -40,6 +40,7 @@ class SecurityAgent:
 
     async def handle_alert(self, alert_text: str, system_context: str, queue: asyncio.Queue, notarizer) -> dict:
         chain = self.chain
+        blockchain_id = None
         print(f"[Security Agent] Analyzing alert: {alert_text}")
         try:
             if not chain:
@@ -54,7 +55,6 @@ class SecurityAgent:
                 raw_response = await chain.ainvoke({"alert": alert_text, "context": system_context})
                 decision_obj = cast(SecurityDecision, raw_response)
             
-            onchain_id = None
             if decision_obj.risk_level >= 2:
                 # Instantly write to the Blockchain (AuditRegistry)
                 ih = hasher.sha256(self.prompt.template)
@@ -62,12 +62,12 @@ class SecurityAgent:
                 rh = hasher.sha256(decision_obj.reasoning)
                 ah = hasher.sha256(decision_obj.action)
                 
-                onchain_id = blockchain.log_ai_action(ih, ch, rh, ah, decision_obj.risk_level)
-                if onchain_id == -1: # fallback to notarizer if chain fails
-                    onchain_id = await notarizer.get_next_id()
+                blockchain_id = blockchain.log_ai_action(ih, ch, rh, ah, decision_obj.risk_level)
+                if blockchain_id == -1: # fallback to notarizer if chain fails
+                    blockchain_id = await notarizer.get_next_id()
                 
                 event = {
-                    "event_id": onchain_id,
+                    "event_id": blockchain_id,
                     "instruction_hash": hasher.sha256(self.prompt.template),
                     "context_hash": hasher.sha256(system_context),
                     "reasoning_hash": hasher.sha256(decision_obj.reasoning),
@@ -98,8 +98,10 @@ class SecurityAgent:
                 reasoning=decision_obj.reasoning,
                 action_taken=decision_obj.action,
                 risk_level=decision_obj.risk_level,
-                event_id=onchain_id,
-                onchain_entry_id=onchain_id
+                # Fix for previous NameError: We use 'blockchain_id' here because 'event_id' is not defined in this local scope.
+                # 'blockchain_id' accurately represents both the local queue ID and the official blockchain Smart Contract entry ID.
+                event_id=blockchain_id,
+                onchain_entry_id=blockchain_id
             )
             database.insert_system_action(
                 action_type=action_type,
@@ -112,7 +114,7 @@ class SecurityAgent:
 
             return {
                 "success": True,
-                "event_id": onchain_id,
+                "event_id": blockchain_id,
                 "action": decision_obj.action,
                 "reasoning": decision_obj.reasoning,
                 "risk_level": decision_obj.risk_level,
